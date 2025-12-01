@@ -1,0 +1,46 @@
+version: "3"
+
+dotenv:
+  - .env
+
+tasks:
+  dev:
+    desc: "Run bot in development mode with polling"
+    cmds:
+      - go run ./cmd/opencode-bot
+
+  build:
+    desc: "Build static binary"
+    cmds:
+      - go build -o opencode-bot -ldflags "-s -w" ./cmd/opencode-bot
+
+  tidy:
+    desc: "Tidy Go dependencies"
+    cmds:
+      - go mod tidy
+
+  docker:build:
+    desc: "Build Docker image"
+    cmds:
+      - docker build -t opencode-bot:latest .
+
+  docker:run:
+    desc: "Run Docker container"
+    cmds:
+      - docker run -d --name opencode-bot -p 8080:8080 --env-file .env opencode-bot:latest
+
+  test:
+    desc: "Run unit tests"
+    cmds:
+      - go test ./...
+
+  test:verbose:
+    desc: "Run unit tests (verbose)"
+    cmds:
+      - go test -v ./...
+
+  coverage:
+    desc: "Run tests and produce coverage profile"
+    cmds:
+      - go test -covermode=count -coverprofile=coverage.out ./...
+      - gcov2lcov -infile=coverage.out -outfile=coverage.lcov
