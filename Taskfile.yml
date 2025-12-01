@@ -44,3 +44,8 @@ tasks:
     cmds:
       - go test -covermode=count -coverprofile=coverage.out ./...
       - gcov2lcov -infile=coverage.out -outfile=coverage.lcov
+
+  coverage:html:
+    desc: "Generate HTML coverage report"
+    cmds:
+      - go tool cover -html=coverage.out -o coverage.html

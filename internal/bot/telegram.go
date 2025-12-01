@@ -9,16 +9,26 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
+type TelegramBotInterface interface {
+	Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error)
+	GetUpdatesChan(config tgbotapi.UpdateConfig) tgbotapi.UpdatesChannel
+	Send(c tgbotapi.Chattable) (tgbotapi.Message, error)
+}
+
+type DebouncerInterface interface {
+	Debounce(key string, text string, fn func(string) error)
+}
+
 type BotApp struct {
-	tg           *tgbotapi.BotAPI
+	tg           TelegramBotInterface
 	cfg          *Config
-	oc           *OpencodeClient
+	oc           OpencodeClientInterface
 	store        store.Store
-	debouncer    *Debouncer
+	debouncer    DebouncerInterface
 	octSessionID string // persistent session whose title starts with "oct_"
 }
 
-func NewBotApp(cfg *Config, oc *OpencodeClient, st store.Store) (*BotApp, error) {
+func NewBotApp(cfg *Config, oc OpencodeClientInterface, st store.Store) (*BotApp, error) {
 	bot, err := tgbotapi.NewBotAPI(cfg.TelegramToken)
 	if err != nil {
 		return nil, err

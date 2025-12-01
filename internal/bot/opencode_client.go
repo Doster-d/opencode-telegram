@@ -12,6 +12,20 @@ import (
 	"strings"
 )
 
+type OpencodeClientInterface interface {
+	SubscribeEvents(handler func(map[string]any)) error
+	GetSessionMessages(sessionID string) (string, error)
+	ListSessions() ([]map[string]any, error)
+	CreateSession(prompt string) (map[string]any, error)
+	PromptSession(sessionID, prompt string) (map[string]any, error)
+	AbortSession(sessionID string) error
+	DeleteSession(sessionID string) error
+}
+
+type Session struct {
+	// define fields if needed
+}
+
 type OpencodeClient struct {
 	base  *url.URL
 	token string
@@ -138,6 +152,10 @@ func (c *OpencodeClient) SubscribeEvents(handler func(map[string]any)) error {
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return err
+	}
+	if resp.StatusCode >= 400 {
+		resp.Body.Close()
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
 	// parse SSE using a buffered reader, handling multiple "data:" lines per event
