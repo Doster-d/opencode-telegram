@@ -108,6 +108,17 @@ func findSessionLikeID(root any) string {
 	return out
 }
 
+func isTerminalSessionEvent(eventType string, payload any, ev map[string]any) bool {
+	if eventType != "session.updated" {
+		return false
+	}
+	status := strings.ToLower(findStringKeyRecursive(payload, "status"))
+	if status == "" {
+		status = strings.ToLower(findStringKeyRecursive(ev, "status"))
+	}
+	return status == "completed" || status == "failed"
+}
+
 // StartEventListener subscribes to opencode SSE events and updates Telegram messages
 // when session message parts are updated. This is a best-effort, minimal implementation
 // that looks for event types commonly emitted by opencode (e.g., "message.part.updated").
@@ -186,6 +197,9 @@ func (a *BotApp) handleEvent(ev map[string]any) {
 		}
 
 		log.Printf("DEBUG: extracted sid=%s", sid)
+		if isTerminalSessionEvent(eventType, payload, ev) {
+			a.clearRunBySession(sid)
+		}
 
 		// lookup mapping
 		chatID, msgID, ok := a.store.GetSession(sid)
@@ -216,7 +230,7 @@ func (a *BotApp) handleEvent(ev map[string]any) {
 		a.debouncer.Debounce(sid, text, func(latestText string) error {
 			edit := tgbotapi.NewEditMessageText(chatID, msgID, latestText)
 			log.Printf("DEBUG: sending edit to telegram: %s", latestText)
-			_, err := a.tg.Request(edit)
+			err := a.requestWithRetry(edit)
 			if err != nil {
 				log.Printf("failed to edit telegram msg for session %s: %v", sid, err)
 			}

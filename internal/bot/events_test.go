@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"opencode-telegram/pkg/store"
 
@@ -440,6 +441,106 @@ func TestBotApp_HandleEvent_RequestError(t *testing.T) {
 		t.Errorf("expected 1 request, got %d", len(mockTG.requests))
 	}
 	// error is logged, but test passes
+}
+
+func TestBotApp_HandleEvent_TerminalEventClearsActiveRunOwnership(t *testing.T) {
+	prompts := 0
+	oc := &mockOpencodeClient{
+		listSessions: func() ([]map[string]any, error) {
+			return []map[string]any{{"id": "ses_u7", "title": "oct_user_7"}}, nil
+		},
+		promptSession: func(_, _ string) (map[string]any, error) {
+			prompts++
+			return map[string]any{"ok": true}, nil
+		},
+		getSessionMessages: func(string) (string, error) {
+			return "", nil
+		},
+	}
+	app, tg, _ := testBotApp(&Config{SessionPrefix: "oct_"}, oc)
+
+	app.handleRun(9, "first", 7)
+	app.handleRun(9, "blocked", 7)
+	app.handleEvent(map[string]any{
+		"type": "session.updated",
+		"data": map[string]any{
+			"sessionID": "ses_u7",
+			"status":    "completed",
+		},
+	})
+	app.handleRun(9, "second", 7)
+
+	if prompts != 2 {
+		t.Fatalf("expected terminal event to unblock run and allow second prompt, got %d prompts", prompts)
+	}
+	if len(tg.sentMessages) != 3 {
+		t.Fatalf("expected running/conflict/running sequence, got %d messages", len(tg.sentMessages))
+	}
+	if !strings.Contains(tg.sentMessages[1].Text, "already active") {
+		t.Fatalf("expected deterministic conflict before terminal clear, got %q", tg.sentMessages[1].Text)
+	}
+}
+
+func TestBotApp_HandleEvent_MultipleProgressEventsEditSingleRunMessage(t *testing.T) {
+	fetches := 0
+	oc := &mockOpencodeClient{
+		listSessions: func() ([]map[string]any, error) {
+			return []map[string]any{{"id": "ses_u7", "title": "oct_user_7"}}, nil
+		},
+		promptSession: func(_, _ string) (map[string]any, error) {
+			return map[string]any{"ok": true}, nil
+		},
+		getSessionMessages: func(string) (string, error) {
+			fetches++
+			if fetches == 1 {
+				return "progress 1", nil
+			}
+			return "progress 2", nil
+		},
+	}
+	app, tg, _ := testBotApp(&Config{SessionPrefix: "oct_"}, oc)
+
+	app.handleRun(5, "go", 7)
+	app.handleEvent(map[string]any{"type": "message.part.updated", "data": map[string]any{"sessionID": "ses_u7"}})
+	app.handleEvent(map[string]any{"type": "message.part.updated", "data": map[string]any{"sessionID": "ses_u7"}})
+
+	if len(tg.sentMessages) != 1 {
+		t.Fatalf("expected a single run message send, got %d", len(tg.sentMessages))
+	}
+	if len(tg.requests) != 2 {
+		t.Fatalf("expected two edit requests for two progress events, got %d", len(tg.requests))
+	}
+	for i, req := range tg.requests {
+		if _, ok := req.(tgbotapi.EditMessageTextConfig); !ok {
+			t.Fatalf("request %d expected EditMessageTextConfig, got %T", i, req)
+		}
+	}
+}
+
+func TestBotApp_HandleEvent_EditRetryIsBounded(t *testing.T) {
+	oc := &mockOpencodeClient{
+		getSessionMessages: func(string) (string, error) {
+			return "progress", nil
+		},
+	}
+	app, tg, st := testBotApp(&Config{}, oc)
+	st.SetSession("ses_123", 1, 99)
+	tg.requestErrs = []error{
+		fmt.Errorf("429 too many requests"),
+		fmt.Errorf("429 too many requests"),
+		fmt.Errorf("429 too many requests"),
+		fmt.Errorf("429 too many requests"),
+	}
+	app.sleep = func(_ time.Duration) {}
+
+	app.handleEvent(map[string]any{
+		"type": "message.part.updated",
+		"data": map[string]any{"sessionID": "ses_123"},
+	})
+
+	if len(tg.requests) != 3 {
+		t.Fatalf("expected bounded retry cap of 3 edit attempts, got %d", len(tg.requests))
+	}
 }
 
 // TestEventListener_ExtractSessionIDFromDifferentLocations tests various event structures
