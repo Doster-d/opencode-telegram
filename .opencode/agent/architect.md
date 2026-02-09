@@ -16,6 +16,11 @@ permission:
     "*": deny
     "general": allow
     "explore": allow
+permission:
+  edit:
+    "*": deny
+    ".opencode/**": allow
+    "docs/**": allow
 ---
 
 # Architect

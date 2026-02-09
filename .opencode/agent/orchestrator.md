@@ -10,6 +10,10 @@ tools:
   skill_use: true
   skill_find: true
   skill_resource: true
+permission:
+  edit:
+    "*": deny
+    ".opencode/**": allow
 ---
 
 # Orchestrator
