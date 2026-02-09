@@ -57,3 +57,5 @@ coverage.out
 coverage.lcov
 coverage.html
 
+oct-repo.md
+.env

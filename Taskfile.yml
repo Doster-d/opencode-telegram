@@ -39,11 +39,39 @@ tasks:
     cmds:
       - go test -v ./...
 
+  lint:
+    desc: "Run golangci-lint using repo config"
+    cmds:
+      - |
+        if command -v golangci-lint >/dev/null 2>&1; then
+          golangci-lint run --config .golangci.yml ./...
+        else
+          "$(go env GOPATH)/bin/golangci-lint" run --config .golangci.yml ./...
+        fi
+
+  lint:install:
+    desc: "Install pinned golangci-lint binary"
+    cmds:
+      - go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
+
+  ci:
+    desc: "Run local checks aligned with CI workflow"
+    cmds:
+      - go build -v ./...
+      - go test -v ./...
+      - task lint
+      - task coverage:check
+
   coverage:
     desc: "Run tests and produce coverage profile"
     cmds:
-      - go test -covermode=count -coverprofile=coverage.out ./...
-      - gcov2lcov -infile=coverage.out -outfile=coverage.lcov
+      - go test -covermode=count -coverprofile=coverage.out ./internal/... ./pkg/...
+
+  coverage:check:
+    desc: "Fail if coverage is below 90%"
+    cmds:
+      - go test -covermode=count -coverprofile=coverage.out ./internal/... ./pkg/...
+      - go run ./cmd/coveragecheck -file coverage.out -min 90
 
   coverage:html:
     desc: "Generate HTML coverage report"
