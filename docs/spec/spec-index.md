@@ -17,6 +17,7 @@ Canonical project documentation lives in `docs/spec`.
 ## Product and System
 
 - [Telegram Command Specification](features/telegram-commands.md)
+- [Telegram UX Session/Run Isolation](features/telegram-ux-session-run-isolation.md)
 - [System Architecture](system/architecture.md)
 
 ## Operational Knowledge
