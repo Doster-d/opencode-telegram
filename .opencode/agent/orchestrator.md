@@ -14,6 +14,9 @@ permission:
   edit:
     "*": deny
     ".opencode/**": allow
+  task:
+    "*": allow
+    "orchestrator": "deny"
 ---
 
 # Orchestrator
