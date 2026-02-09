@@ -1,0 +1,30 @@
+{
+  "promptRenderer": "xml",
+  "modelRenderers": {
+    "github-copilot/claude-haiku-4.5": "xml",
+    "github-copilot/claude-opus-4.5": "xml",
+    "github-copilot/claude-opus-41": "xml",
+    "github-copilot/claude-sonnet-4": "xml",
+    "github-copilot/claude-sonnet-4.5": "xml",
+    "github-copilot/gemini-2.5-pro": "json",
+    "github-copilot/gemini-3-flash-preview": "json",
+    "github-copilot/gemini-3-pro-preview": "json",
+    "github-copilot/gpt-4.1": "json",
+    "github-copilot/gpt-4o": "json",
+    "github-copilot/gpt-5": "json",
+    "github-copilot/gpt-5-codex": "json",
+    "github-copilot/gpt-5-mini": "json",
+    "github-copilot/gpt-5.1": "json",
+    "github-copilot/gpt-5.1-codex": "json",
+    "github-copilot/gpt-5.1-codex-max": "json",
+    "github-copilot/gpt-5.1-codex-mini": "json",
+    "github-copilot/gpt-5.2": "json",
+    "github-copilot/gpt-5.2-codex": "json",
+    "github-copilot/grok-code-fast-1": "json"
+  },
+  "basePaths": [
+    ".opencode/skills",
+    ".opencode/domain-skills",
+    "~/.config/opencode/skills"
+  ]
+}
