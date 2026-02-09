@@ -1,636 +1,391 @@
 package bot
 
 import (
-	"opencode-telegram/pkg/store"
+	"fmt"
 	"strings"
 	"testing"
-	"time"
+
+	"opencode-telegram/pkg/store"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-// MockTelegramBot for testing (stub)
-type MockTelegramBot struct {
-	*tgbotapi.BotAPI
+type recordingTelegramBot struct {
+	updates      tgbotapi.UpdatesChannel
 	sentMessages []tgbotapi.MessageConfig
-	sentEdits    []tgbotapi.EditMessageTextConfig
-	updatesChan  tgbotapi.UpdatesChannel
+	requests     []tgbotapi.Chattable
+	nextMsgID    int
 }
 
-func (m *MockTelegramBot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
-	// Mock implementation - just track calls
+func (m *recordingTelegramBot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 	if msg, ok := c.(tgbotapi.MessageConfig); ok {
 		m.sentMessages = append(m.sentMessages, msg)
 	}
-	return tgbotapi.Message{}, nil
+	m.nextMsgID++
+	return tgbotapi.Message{MessageID: m.nextMsgID}, nil
 }
 
-func (m *MockTelegramBot) GetUpdatesChan(config tgbotapi.UpdateConfig) tgbotapi.UpdatesChannel {
-	if m.updatesChan == nil {
-		m.updatesChan = make(chan tgbotapi.Update, 1)
+func (m *recordingTelegramBot) GetUpdatesChan(config tgbotapi.UpdateConfig) tgbotapi.UpdatesChannel {
+	if m.updates == nil {
+		m.updates = make(chan tgbotapi.Update)
 	}
-	return m.updatesChan
+	return m.updates
 }
 
-func (m *MockTelegramBot) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
-	// Mock implementation
-	if edit, ok := c.(tgbotapi.EditMessageTextConfig); ok {
-		m.sentEdits = append(m.sentEdits, edit)
-	}
-	return nil, nil
+func (m *recordingTelegramBot) Request(c tgbotapi.Chattable) (*tgbotapi.APIResponse, error) {
+	m.requests = append(m.requests, c)
+	return &tgbotapi.APIResponse{}, nil
 }
 
-// TestBotApp_IsAllowed tests the permission checking
-func TestBotApp_IsAllowed(t *testing.T) {
-	tests := []struct {
-		name      string
-		allowedID map[int64]bool
-		userID    int64
-		expected  bool
-	}{
-		{
-			name:      "empty allowed list allows all",
-			allowedID: map[int64]bool{},
-			userID:    12345,
-			expected:  true,
-		},
-		{
-			name:      "user in allowed list",
-			allowedID: map[int64]bool{123: true, 456: true},
-			userID:    123,
-			expected:  true,
-		},
-		{
-			name:      "user not in allowed list",
-			allowedID: map[int64]bool{123: true, 456: true},
-			userID:    789,
-			expected:  false,
-		},
-		{
-			name:      "single allowed user",
-			allowedID: map[int64]bool{999: true},
-			userID:    999,
-			expected:  true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &Config{
-				AllowedIDs: tt.allowedID,
-				AdminIDs:   map[int64]bool{},
-			}
-			app := &BotApp{
-				cfg: cfg,
-			}
-			got := app.isAllowed(tt.userID)
-			if got != tt.expected {
-				t.Errorf("isAllowed(%d) = %v, want %v", tt.userID, got, tt.expected)
-			}
-		})
-	}
-}
-
-// TestBotApp_IsAdmin tests admin checking
-func TestBotApp_IsAdmin(t *testing.T) {
-	tests := []struct {
-		name     string
-		adminIDs map[int64]bool
-		userID   int64
-		expected bool
-	}{
-		{
-			name:     "user is admin",
-			adminIDs: map[int64]bool{123: true, 456: true},
-			userID:   123,
-			expected: true,
-		},
-		{
-			name:     "user is not admin",
-			adminIDs: map[int64]bool{123: true, 456: true},
-			userID:   789,
-			expected: false,
-		},
-		{
-			name:     "empty admin list",
-			adminIDs: map[int64]bool{},
-			userID:   123,
-			expected: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &Config{
-				AdminIDs: tt.adminIDs,
-			}
-			app := &BotApp{
-				cfg: cfg,
-			}
-			got := app.isAdmin(tt.userID)
-			if got != tt.expected {
-				t.Errorf("isAdmin(%d) = %v, want %v", tt.userID, got, tt.expected)
-			}
-		})
-	}
-}
-
-// TestBotApp_NewBotApp tests basic initialization
-func TestBotApp_NewBotApp_WithValidSession(t *testing.T) {
-	// This test would require mocking the actual Telegram API
-	// For now we demonstrate the structure
-	cfg := &Config{
-		TelegramToken: "fake_token",
-		SessionPrefix: "oct_",
-	}
-
-	// Would need to mock the bot creation and opencode client
-	// This is left as a placeholder for integration testing
-	_ = cfg
-}
-
-// TestBotApp_IsAllowed_EdgeCases tests edge cases
-func TestBotApp_IsAllowed_EdgeCases(t *testing.T) {
-	tests := []struct {
-		name      string
-		allowedID map[int64]bool
-		userID    int64
-		expected  bool
-	}{
-		{
-			name:      "negative user ID",
-			allowedID: map[int64]bool{-1: true},
-			userID:    -1,
-			expected:  true,
-		},
-		{
-			name:      "zero user ID",
-			allowedID: map[int64]bool{0: true},
-			userID:    0,
-			expected:  true,
-		},
-		{
-			name:      "large user ID",
-			allowedID: map[int64]bool{9223372036854775807: true},
-			userID:    9223372036854775807,
-			expected:  true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &Config{
-				AllowedIDs: tt.allowedID,
-				AdminIDs:   map[int64]bool{},
-			}
-			app := &BotApp{
-				cfg: cfg,
-			}
-			got := app.isAllowed(tt.userID)
-			if got != tt.expected {
-				t.Errorf("isAllowed(%d) = %v, want %v", tt.userID, got, tt.expected)
-			}
-		})
-	}
-}
-
-// TestBotApp_AdminSubsetOfAllowed tests that admin users should be in allowed list
-func TestBotApp_AdminUsers_ShouldBeAllowed(t *testing.T) {
-	cfg := &Config{
-		AllowedIDs: map[int64]bool{123: true, 456: true},
-		AdminIDs:   map[int64]bool{123: true},
-	}
-	app := &BotApp{cfg: cfg}
-
-	if !app.isAllowed(123) {
-		t.Errorf("admin user should be in allowed list")
-	}
-	if !app.isAdmin(123) {
-		t.Errorf("user should be admin")
-	}
-}
-
-// TestBotApp_DebounceConfiguration tests that debouncer is configured
-func TestBotApp_DebouncerInitialized(t *testing.T) {
-	cfg := &Config{
-		AllowedIDs:    map[int64]bool{},
-		AdminIDs:      map[int64]bool{},
-		SessionPrefix: "oct_",
-	}
-	app := &BotApp{
-		cfg:       cfg,
-		debouncer: NewDebouncer(500 * time.Millisecond),
-		store:     store.NewMemoryStore(),
-	}
-
-	if app.debouncer == nil {
-		t.Errorf("debouncer should be initialized")
-	}
-}
-
-// TestBotApp_StoreInitialized tests that store is set
-func TestBotApp_StoreInitialized(t *testing.T) {
+func testBotApp(cfg *Config, oc OpencodeClientInterface) (*BotApp, *recordingTelegramBot, *store.MemoryStore) {
+	tg := &recordingTelegramBot{}
 	st := store.NewMemoryStore()
-	cfg := &Config{
-		AllowedIDs:    map[int64]bool{},
-		AdminIDs:      map[int64]bool{},
-		SessionPrefix: "oct_",
+	app := &BotApp{tg: tg, cfg: cfg, oc: oc, store: st, octSessionID: "ses_oct"}
+	return app, tg, st
+}
+
+func withMockTelegramFactory(t *testing.T, factory func(token string) (TelegramBotInterface, error)) {
+	t.Helper()
+	original := newTelegramBot
+	newTelegramBot = factory
+	t.Cleanup(func() {
+		newTelegramBot = original
+	})
+}
+
+func TestNewBotApp(t *testing.T) {
+	withMockTelegramFactory(t, func(token string) (TelegramBotInterface, error) {
+		return &recordingTelegramBot{}, nil
+	})
+
+	cfg := &Config{TelegramToken: "token", SessionPrefix: "oct_"}
+	st := store.NewMemoryStore()
+
+	t.Run("finds existing prefixed session", func(t *testing.T) {
+		oc := &mockOpencodeClient{listSessions: func() ([]map[string]any, error) {
+			return []map[string]any{{"id": "ses_existing", "title": "oct_existing"}}, nil
+		}}
+
+		app, err := NewBotApp(cfg, oc, st)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if app.octSessionID != "ses_existing" {
+			t.Fatalf("expected existing session id, got %q", app.octSessionID)
+		}
+	})
+
+	t.Run("creates session when none found", func(t *testing.T) {
+		oc := &mockOpencodeClient{
+			listSessions:  func() ([]map[string]any, error) { return []map[string]any{{"id": "ses_other", "title": "other"}}, nil },
+			createSession: func(string) (map[string]any, error) { return map[string]any{"id": "ses_created"}, nil },
+		}
+
+		app, err := NewBotApp(cfg, oc, st)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if app.octSessionID != "ses_created" {
+			t.Fatalf("expected created session id, got %q", app.octSessionID)
+		}
+	})
+
+	t.Run("fails when bot init fails", func(t *testing.T) {
+		withMockTelegramFactory(t, func(token string) (TelegramBotInterface, error) {
+			return nil, fmt.Errorf("bad token")
+		})
+		oc := &mockOpencodeClient{listSessions: func() ([]map[string]any, error) { return nil, nil }}
+
+		if _, err := NewBotApp(cfg, oc, st); err == nil {
+			t.Fatalf("expected bot init error")
+		}
+	})
+
+	t.Run("fails when list sessions errors", func(t *testing.T) {
+		oc := &mockOpencodeClient{listSessions: func() ([]map[string]any, error) { return nil, fmt.Errorf("list failed") }}
+
+		if _, err := NewBotApp(cfg, oc, st); err == nil || !strings.Contains(err.Error(), "failed to list sessions") {
+			t.Fatalf("expected list sessions error, got %v", err)
+		}
+	})
+
+	t.Run("fails when create session has no id", func(t *testing.T) {
+		oc := &mockOpencodeClient{
+			listSessions:  func() ([]map[string]any, error) { return nil, nil },
+			createSession: func(string) (map[string]any, error) { return map[string]any{"title": "x"}, nil },
+		}
+
+		if _, err := NewBotApp(cfg, oc, st); err == nil || !strings.Contains(err.Error(), "session id not found") {
+			t.Fatalf("expected missing id error, got %v", err)
+		}
+	})
+}
+
+func TestBotApp_AccessChecks(t *testing.T) {
+	app, _, _ := testBotApp(&Config{AllowedIDs: map[int64]bool{1: true}, AdminIDs: map[int64]bool{9: true}}, &mockOpencodeClient{})
+
+	if app.isAllowed(1) != true {
+		t.Fatalf("expected user 1 to be allowed")
 	}
-	app := &BotApp{
-		cfg:   cfg,
-		store: st,
+	if app.isAllowed(2) != false {
+		t.Fatalf("expected user 2 to be denied")
+	}
+	if app.isAdmin(9) != true {
+		t.Fatalf("expected user 9 to be admin")
+	}
+	if app.isAdmin(1) != false {
+		t.Fatalf("expected user 1 to be non-admin")
 	}
 
-	if app.store == nil {
-		t.Errorf("store should be initialized")
+	openApp, _, _ := testBotApp(&Config{AllowedIDs: map[int64]bool{}, AdminIDs: map[int64]bool{}}, &mockOpencodeClient{})
+	if openApp.isAllowed(42) != true {
+		t.Fatalf("empty allowed list should allow all users")
 	}
 }
 
-// TestBotApp_ConfigurationPreserved tests that config is preserved
-func TestBotApp_ConfigurationPreserved(t *testing.T) {
-	expectedPrefix := "test_prefix_"
-	expectedBase := "http://example.com"
-
-	cfg := &Config{
-		SessionPrefix: expectedPrefix,
-		OpencodeBase:  expectedBase,
-		AllowedIDs:    map[int64]bool{},
-		AdminIDs:      map[int64]bool{},
-	}
-	app := &BotApp{
-		cfg: cfg,
-	}
-
-	if app.cfg.SessionPrefix != expectedPrefix {
-		t.Errorf("session prefix not preserved: got %q, want %q", app.cfg.SessionPrefix, expectedPrefix)
-	}
-	if app.cfg.OpencodeBase != expectedBase {
-		t.Errorf("opencode base not preserved: got %q, want %q", app.cfg.OpencodeBase, expectedBase)
-	}
-}
-
-// TestBotApp_HandleStatus tests handleStatus
 func TestBotApp_HandleStatus(t *testing.T) {
-	mockTG := &MockTelegramBot{}
-	cfg := &Config{OpencodeBase: "http://test.com"}
-	app := &BotApp{
-		tg:  mockTG,
-		cfg: cfg,
-	}
+	app, tg, _ := testBotApp(&Config{OpencodeBase: "http://local"}, &mockOpencodeClient{})
 	app.handleStatus(123)
-	if len(mockTG.sentMessages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(mockTG.sentMessages))
+
+	if len(tg.sentMessages) != 1 {
+		t.Fatalf("expected 1 status message, got %d", len(tg.sentMessages))
 	}
-	msg := mockTG.sentMessages[0]
-	if msg.ChatID != 123 {
-		t.Errorf("expected chatID 123, got %d", msg.ChatID)
-	}
-	expected := "Opencode: http://test.com"
-	if msg.Text != expected {
-		t.Errorf("expected %q, got %q", expected, msg.Text)
+	if tg.sentMessages[0].Text != "Opencode: http://local" {
+		t.Fatalf("unexpected status text: %q", tg.sentMessages[0].Text)
 	}
 }
 
-// TestBotApp_HandleSessions tests handleSessions
 func TestBotApp_HandleSessions(t *testing.T) {
-	mockTG := &MockTelegramBot{}
-	mockOC := &mockOpencodeClient{
-		listSessions: func() ([]map[string]any, error) {
-			return []map[string]any{
-				{"id": "ses_1", "title": "oct_1"},
-				{"id": "ses_2", "title": "other"},
-			}, nil
-		},
-	}
-	cfg := &Config{SessionPrefix: "oct_"}
-	app := &BotApp{
-		tg:  mockTG,
-		oc:  mockOC,
-		cfg: cfg,
-	}
-	app.handleSessions(123)
-	if len(mockTG.sentMessages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(mockTG.sentMessages))
-	}
-	msg := mockTG.sentMessages[0]
-	if !strings.Contains(msg.Text, "ses_1") {
-		t.Errorf("expected ses_1 in text, got %q", msg.Text)
-	}
+	t.Run("error path", func(t *testing.T) {
+		oc := &mockOpencodeClient{listSessions: func() ([]map[string]any, error) { return nil, fmt.Errorf("boom") }}
+		app, tg, _ := testBotApp(&Config{SessionPrefix: "oct_"}, oc)
+		app.handleSessions(1)
+
+		if len(tg.sentMessages) != 1 || !strings.Contains(tg.sentMessages[0].Text, "Error listing sessions") {
+			t.Fatalf("expected error message, got %+v", tg.sentMessages)
+		}
+	})
+
+	t.Run("no sessions", func(t *testing.T) {
+		oc := &mockOpencodeClient{listSessions: func() ([]map[string]any, error) { return []map[string]any{}, nil }}
+		app, tg, _ := testBotApp(&Config{SessionPrefix: "oct_"}, oc)
+		app.handleSessions(1)
+
+		if len(tg.sentMessages) != 1 || tg.sentMessages[0].Text != "No sessions" {
+			t.Fatalf("expected no sessions message, got %+v", tg.sentMessages)
+		}
+	})
+
+	t.Run("prefix filter", func(t *testing.T) {
+		oc := &mockOpencodeClient{listSessions: func() ([]map[string]any, error) {
+			return []map[string]any{{"id": "ses_1", "title": "oct_alpha"}, {"id": "ses_2", "title": "other"}}, nil
+		}}
+		app, tg, _ := testBotApp(&Config{SessionPrefix: "oct_"}, oc)
+		app.handleSessions(1)
+
+		if len(tg.sentMessages) != 1 {
+			t.Fatalf("expected one message, got %d", len(tg.sentMessages))
+		}
+		if strings.Contains(tg.sentMessages[0].Text, "ses_2") {
+			t.Fatalf("did not expect non-prefixed session in output: %q", tg.sentMessages[0].Text)
+		}
+	})
 }
 
-// TestBotApp_HandleSessions_Error tests handleSessions with error
-func TestBotApp_HandleSessions_Error(t *testing.T) {
-	mockTG := &MockTelegramBot{}
-	mockOC := &mockOpencodeClient{
-		listSessions: func() ([]map[string]any, error) {
-			return nil, fmt.Errorf("list error")
-		},
-	}
-	app := &BotApp{
-		tg: mockTG,
-		oc: mockOC,
-	}
-	app.handleSessions(123)
-	if len(mockTG.sentMessages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(mockTG.sentMessages))
-	}
-	msg := mockTG.sentMessages[0]
-	if !strings.Contains(msg.Text, "Error listing sessions") {
-		t.Errorf("expected error message, got %q", msg.Text)
-	}
-}
-	cfg := &Config{SessionPrefix: "oct_"}
-	app := &BotApp{
-		tg:  mockTG,
-		oc:  mockOC,
-		cfg: cfg,
-	}
-	app.handleSessions(123)
-	if len(mockTG.sentMessages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(mockTG.sentMessages))
-	}
-	msg := mockTG.sentMessages[0]
-	if msg.ChatID != 123 {
-		t.Errorf("expected chatID 123, got %d", msg.ChatID)
-	}
-	// Check content
-	if !strings.Contains(msg.Text, "ses_1") {
-		t.Errorf("expected ses_1 in text, got %q", msg.Text)
-	}
-}
-
-// TestBotApp_HandleSessions_Error tests handleSessions with error
-func TestBotApp_HandleSessions_Error(t *testing.T) {
-	mockTG := &MockTelegramBot{}
-	mockOC := &mockOpencodeClient{
-		listSessions: func() ([]map[string]any, error) {
-			return nil, fmt.Errorf("list error")
-		},
-	}
-	app := &BotApp{
-		tg: mockTG,
-		oc: mockOC,
-	}
-	app.handleSessions(123)
-	if len(mockTG.sentMessages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(mockTG.sentMessages))
-	}
-	msg := mockTG.sentMessages[0]
-	if !strings.Contains(msg.Text, "Error listing sessions") {
-		t.Errorf("expected error message, got %q", msg.Text)
-	}
-}
-
-// TestBotApp_HandleCreateSession tests handleCreateSession
 func TestBotApp_HandleCreateSession(t *testing.T) {
-	mockTG := &MockTelegramBot{}
-	mockOC := &mockOpencodeClient{
-		createSession: func(title string) (map[string]any, error) {
-			return map[string]any{"id": "ses_new", "title": title}, nil
-		},
+	oc := &mockOpencodeClient{createSession: func(title string) (map[string]any, error) {
+		return map[string]any{"id": "ses_new", "title": title}, nil
+	}}
+	app, tg, st := testBotApp(&Config{SessionPrefix: "oct_"}, oc)
+
+	app.handleCreateSession(10, "", 20)
+
+	if len(tg.sentMessages) != 1 || !strings.Contains(tg.sentMessages[0].Text, "Created session: ses_new") {
+		t.Fatalf("expected created message, got %+v", tg.sentMessages)
 	}
-	store := store.NewMemoryStore()
-	cfg := &Config{SessionPrefix: "oct_"}
-	app := &BotApp{
-		tg:    mockTG,
-		oc:    mockOC,
-		store: store,
-		cfg:   cfg,
-	}
-	app.handleCreateSession(123, "test session", 456)
-	if len(mockTG.sentMessages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(mockTG.sentMessages))
-	}
-	msg := mockTG.sentMessages[0]
-	if !strings.Contains(msg.Text, "ses_new") {
-		t.Errorf("expected ses_new in text, got %q", msg.Text)
-	}
-	// Check user session set
-	if sid, ok := store.GetUserSession(456); !ok || sid != "ses_new" {
-		t.Errorf("expected user session ses_new, got %v", sid)
+	if sid, ok := st.GetUserSession(20); !ok || sid != "ses_new" {
+		t.Fatalf("expected selected user session ses_new, got %q ok=%v", sid, ok)
 	}
 }
 
-// TestBotApp_HandleCreateSession_EmptyTitle tests handleCreateSession with empty title
-func TestBotApp_HandleCreateSession_EmptyTitle(t *testing.T) {
-	mockTG := &MockTelegramBot{}
-	mockOC := &mockOpencodeClient{
-		createSession: func(title string) (map[string]any, error) {
-			return map[string]any{"id": "ses_new", "title": title}, nil
-		},
-	}
-	store := store.NewMemoryStore()
-	cfg := &Config{SessionPrefix: "oct_"}
-	app := &BotApp{
-		tg:    mockTG,
-		oc:    mockOC,
-		store: store,
-		cfg:   cfg,
-	}
-	app.handleCreateSession(123, "", 456)
-	if len(mockTG.sentMessages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(mockTG.sentMessages))
-	}
-	msg := mockTG.sentMessages[0]
-	if !strings.Contains(msg.Text, "ses_new") {
-		t.Errorf("expected ses_new in text, got %q", msg.Text)
-	}
-}
-
-// TestBotApp_HandleDeleteSession tests handleDeleteSession
 func TestBotApp_HandleDeleteSession(t *testing.T) {
-	mockTG := &MockTelegramBot{}
-	mockOC := &mockOpencodeClient{
-		deleteSession: func(id string) error {
-			return nil
-		},
-	}
-	store := store.NewMemoryStore()
-	cfg := &Config{AdminIDs: map[int64]bool{456: true}}
-	app := &BotApp{
-		tg:    mockTG,
-		oc:    mockOC,
-		store: store,
-		cfg:   cfg,
-	}
-	app.handleDeleteSession(123, "ses_del", 456)
-	if len(mockTG.sentMessages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(mockTG.sentMessages))
-	}
-	msg := mockTG.sentMessages[0]
-	if !strings.Contains(msg.Text, "Deleted session") {
-		t.Errorf("expected deleted message, got %q", msg.Text)
-	}
+	t.Run("usage", func(t *testing.T) {
+		app, tg, _ := testBotApp(&Config{AdminIDs: map[int64]bool{1: true}}, &mockOpencodeClient{})
+		app.handleDeleteSession(1, "", 1)
+		if len(tg.sentMessages) != 1 || !strings.Contains(tg.sentMessages[0].Text, "Usage: /deletesession") {
+			t.Fatalf("expected usage message, got %+v", tg.sentMessages)
+		}
+	})
+
+	t.Run("admin required", func(t *testing.T) {
+		app, tg, _ := testBotApp(&Config{AdminIDs: map[int64]bool{}}, &mockOpencodeClient{})
+		app.handleDeleteSession(1, "ses_x", 9)
+		if len(tg.sentMessages) != 1 || !strings.Contains(tg.sentMessages[0].Text, "Only admins") {
+			t.Fatalf("expected admin rejection, got %+v", tg.sentMessages)
+		}
+	})
+
+	t.Run("delete failure", func(t *testing.T) {
+		oc := &mockOpencodeClient{deleteSession: func(string) error { return fmt.Errorf("failed") }}
+		app, tg, _ := testBotApp(&Config{AdminIDs: map[int64]bool{1: true}}, oc)
+		app.handleDeleteSession(1, "ses_x", 1)
+		if len(tg.sentMessages) != 1 || !strings.Contains(tg.sentMessages[0].Text, "Failed to delete") {
+			t.Fatalf("expected failure message, got %+v", tg.sentMessages)
+		}
+	})
 }
 
-// TestBotApp_HandleSelectSession tests handleSelectSession
 func TestBotApp_HandleSelectSession(t *testing.T) {
-	mockTG := &MockTelegramBot{}
-	mockOC := &mockOpencodeClient{
-		listSessions: func() ([]map[string]any, error) {
-			return []map[string]any{
-				{"id": "ses_1", "title": "test_session"},
-			}, nil
-		},
-	}
-	store := store.NewMemoryStore()
-	app := &BotApp{
-		tg:    mockTG,
-		oc:    mockOC,
-		store: store,
-	}
-	app.handleSelectSession(123, "test", 456)
-	if len(mockTG.sentMessages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(mockTG.sentMessages))
-	}
-	msg := mockTG.sentMessages[0]
-	if !strings.Contains(msg.Text, "ses_1") {
-		t.Errorf("expected ses_1 in text, got %q", msg.Text)
-	}
-	// Check user session
-	if sid, ok := store.GetUserSession(456); !ok || sid != "ses_1" {
-		t.Errorf("expected user session ses_1, got %v", sid)
-	}
+	t.Run("usage", func(t *testing.T) {
+		app, tg, _ := testBotApp(&Config{}, &mockOpencodeClient{})
+		app.handleSelectSession(1, "", 7)
+		if len(tg.sentMessages) != 1 || !strings.Contains(tg.sentMessages[0].Text, "Usage: /selectsession") {
+			t.Fatalf("expected usage message, got %+v", tg.sentMessages)
+		}
+	})
+
+	t.Run("direct id", func(t *testing.T) {
+		app, tg, st := testBotApp(&Config{}, &mockOpencodeClient{})
+		app.handleSelectSession(1, "ses_abc", 7)
+
+		if sid, ok := st.GetUserSession(7); !ok || sid != "ses_abc" {
+			t.Fatalf("expected ses_abc selected, got %q ok=%v", sid, ok)
+		}
+		if len(tg.sentMessages) != 1 || !strings.Contains(tg.sentMessages[0].Text, "Selected session") {
+			t.Fatalf("expected selected message, got %+v", tg.sentMessages)
+		}
+	})
+
+	t.Run("find by title prefix", func(t *testing.T) {
+		oc := &mockOpencodeClient{listSessions: func() ([]map[string]any, error) {
+			return []map[string]any{{"id": "ses_1", "title": "alpha-chat"}}, nil
+		}}
+		app, tg, st := testBotApp(&Config{}, oc)
+		app.handleSelectSession(1, "alpha", 7)
+
+		if sid, ok := st.GetUserSession(7); !ok || sid != "ses_1" {
+			t.Fatalf("expected ses_1 selected, got %q ok=%v", sid, ok)
+		}
+		if len(tg.sentMessages) != 1 || !strings.Contains(tg.sentMessages[0].Text, "ses_1") {
+			t.Fatalf("expected selected response, got %+v", tg.sentMessages)
+		}
+	})
+
+	t.Run("list sessions failure", func(t *testing.T) {
+		oc := &mockOpencodeClient{listSessions: func() ([]map[string]any, error) { return nil, fmt.Errorf("down") }}
+		app, tg, _ := testBotApp(&Config{}, oc)
+		app.handleSelectSession(1, "alpha", 7)
+		if len(tg.sentMessages) != 1 || !strings.Contains(tg.sentMessages[0].Text, "Error listing sessions") {
+			t.Fatalf("expected list error message, got %+v", tg.sentMessages)
+		}
+	})
+
+	t.Run("no match", func(t *testing.T) {
+		oc := &mockOpencodeClient{listSessions: func() ([]map[string]any, error) {
+			return []map[string]any{{"id": "ses_1", "title": "beta-chat"}}, nil
+		}}
+		app, tg, _ := testBotApp(&Config{}, oc)
+		app.handleSelectSession(1, "alpha", 7)
+		if len(tg.sentMessages) != 1 || !strings.Contains(tg.sentMessages[0].Text, "No session found") {
+			t.Fatalf("expected no-match message, got %+v", tg.sentMessages)
+		}
+	})
 }
 
-// TestBotApp_HandleMySession tests handleMySession
-func TestBotApp_HandleMySession(t *testing.T) {
-	mockTG := &MockTelegramBot{}
-	store := store.NewMemoryStore()
-	store.SetUserSession(456, "ses_1")
-	app := &BotApp{
-		tg:    mockTG,
-		store: store,
-	}
-	app.handleMySession(123, 456)
-	if len(mockTG.sentMessages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(mockTG.sentMessages))
-	}
-	msg := mockTG.sentMessages[0]
-	if !strings.Contains(msg.Text, "ses_1") {
-		t.Errorf("expected ses_1 in text, got %q", msg.Text)
-	}
+func TestBotApp_HandleMySessionAndAbort(t *testing.T) {
+	t.Run("my session missing", func(t *testing.T) {
+		app, tg, _ := testBotApp(&Config{}, &mockOpencodeClient{})
+		app.handleMySession(1, 7)
+		if len(tg.sentMessages) != 1 || !strings.Contains(tg.sentMessages[0].Text, "have not selected") {
+			t.Fatalf("expected not-selected message, got %+v", tg.sentMessages)
+		}
+	})
+
+	t.Run("abort success", func(t *testing.T) {
+		oc := &mockOpencodeClient{abortSession: func(string) error { return nil }}
+		app, tg, _ := testBotApp(&Config{AdminIDs: map[int64]bool{7: true}}, oc)
+		app.handleAbort(1, "ses_1", 7)
+		if len(tg.sentMessages) != 1 || tg.sentMessages[0].Text != "Aborted session: ses_1" {
+			t.Fatalf("expected success abort message, got %+v", tg.sentMessages)
+		}
+	})
+
+	t.Run("abort usage/admin/error", func(t *testing.T) {
+		oc := &mockOpencodeClient{abortSession: func(string) error { return fmt.Errorf("abort failed") }}
+		app, tg, _ := testBotApp(&Config{AdminIDs: map[int64]bool{7: true}}, oc)
+
+		app.handleAbort(1, "", 7)
+		app.handleAbort(1, "ses_1", 8)
+		app.handleAbort(1, "ses_1", 7)
+
+		if len(tg.sentMessages) != 3 {
+			t.Fatalf("expected 3 abort messages, got %d", len(tg.sentMessages))
+		}
+		if !strings.Contains(tg.sentMessages[0].Text, "Usage: /abort") {
+			t.Fatalf("expected usage message, got %q", tg.sentMessages[0].Text)
+		}
+		if !strings.Contains(tg.sentMessages[1].Text, "Only admins") {
+			t.Fatalf("expected admin message, got %q", tg.sentMessages[1].Text)
+		}
+		if !strings.Contains(tg.sentMessages[2].Text, "Abort failed") {
+			t.Fatalf("expected abort failure message, got %q", tg.sentMessages[2].Text)
+		}
+	})
 }
 
-// TestBotApp_HandleRun tests handleRun
 func TestBotApp_HandleRun(t *testing.T) {
-	mockTG := &MockTelegramBot{}
-	mockOC := &mockOpencodeClient{
-		promptSession: func(id, prompt string) (map[string]any, error) {
-			return map[string]any{"ok": true}, nil
-		},
-	}
-	store := store.NewMemoryStore()
-	app := &BotApp{
-		tg:           mockTG,
-		oc:           mockOC,
-		store:        store,
-		octSessionID: "ses_oct",
-	}
-	app.handleRun(123, "test prompt", 456)
-	if len(mockTG.sentMessages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(mockTG.sentMessages))
-	}
-	msg := mockTG.sentMessages[0]
-	if !strings.Contains(msg.Text, "Running on Opencode") {
-		t.Errorf("expected running message, got %q", msg.Text)
-	}
-	// Check session set
-	if chatID, msgID, ok := store.GetSession("ses_oct"); !ok || chatID != 123 {
-		t.Errorf("expected session set, got %v, %v", chatID, msgID)
-	}
-}
-
-// TestBotApp_HandleAbort tests handleAbort
-func TestBotApp_HandleAbort(t *testing.T) {
-	mockTG := &MockTelegramBot{}
-	mockOC := &mockOpencodeClient{
-		abortSession: func(id string) error {
-			return nil
-		},
-	}
-	cfg := &Config{AdminIDs: map[int64]bool{456: true}}
-	app := &BotApp{
-		tg:  mockTG,
-		oc:  mockOC,
-		cfg: cfg,
-	}
-	app.handleAbort(123, "ses_abort", 456)
-	if len(mockTG.sentMessages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(mockTG.sentMessages))
-	}
-	msg := mockTG.sentMessages[0]
-	if !strings.Contains(msg.Text, "Aborted session") {
-		t.Errorf("expected aborted message, got %q", msg.Text)
-	}
-}
-
-// TestBotApp_StartPolling tests StartPolling with a command
-func TestBotApp_StartPolling_Command(t *testing.T) {
-	mockTG := &MockTelegramBot{}
-	cfg := &Config{AllowedIDs: map[int64]bool{456: true}}
-	app := &BotApp{
-		tg:  mockTG,
-		cfg: cfg,
-	}
-	ch := make(chan tgbotapi.Update, 1)
-	mockTG.updatesChan = ch
-	// Send a command update
-	go func() {
-		ch <- tgbotapi.Update{
-			Message: &tgbotapi.Message{
-				Chat:     &tgbotapi.Chat{ID: 123},
-				From:     &tgbotapi.User{ID: 456},
-				Text:     "/status",
-				Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 7}},
-			},
+	t.Run("usage when prompt empty", func(t *testing.T) {
+		app, tg, _ := testBotApp(&Config{}, &mockOpencodeClient{})
+		app.handleRun(1, "", 1)
+		if len(tg.sentMessages) != 1 || !strings.Contains(tg.sentMessages[0].Text, "Usage: /run") {
+			t.Fatalf("expected usage message, got %+v", tg.sentMessages)
 		}
-		close(ch)
-	}()
-	err := app.StartPolling()
-	if err != nil {
-		t.Errorf("StartPolling error: %v", err)
-	}
-	if len(mockTG.sentMessages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(mockTG.sentMessages))
-	}
+	})
+
+	t.Run("prompt error", func(t *testing.T) {
+		oc := &mockOpencodeClient{promptSession: func(_, _ string) (map[string]any, error) {
+			return nil, fmt.Errorf("prompt failed")
+		}}
+		app, tg, st := testBotApp(&Config{}, oc)
+		app.handleRun(5, "hello", 7)
+
+		if len(tg.sentMessages) != 2 {
+			t.Fatalf("expected running + error messages, got %d", len(tg.sentMessages))
+		}
+		if _, _, ok := st.GetSession("ses_oct"); !ok {
+			t.Fatalf("expected run path to store session mapping")
+		}
+	})
 }
 
-// TestBotApp_StartPolling_Text tests StartPolling with text
-func TestBotApp_StartPolling_Text(t *testing.T) {
-	mockTG := &MockTelegramBot{}
-	mockOC := &mockOpencodeClient{
-		promptSession: func(id, prompt string) (map[string]any, error) {
-			return map[string]any{"ok": true}, nil
-		},
+func TestBotApp_StartPolling(t *testing.T) {
+	oc := &mockOpencodeClient{promptSession: func(_, _ string) (map[string]any, error) { return map[string]any{"ok": true}, nil }}
+	app, tg, _ := testBotApp(&Config{AllowedIDs: map[int64]bool{1: true}, OpencodeBase: "http://local"}, oc)
+
+	updates := make(chan tgbotapi.Update, 5)
+	tg.updates = updates
+
+	updates <- tgbotapi.Update{Message: nil}
+	updates <- tgbotapi.Update{Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 1}, From: &tgbotapi.User{ID: 2}, Text: "/status", Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 7}}}}
+	updates <- tgbotapi.Update{Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 1}, From: &tgbotapi.User{ID: 1}, Text: "/status", Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 7}}}}
+	updates <- tgbotapi.Update{Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 1}, From: &tgbotapi.User{ID: 1}, Text: "/unknown", Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 8}}}}
+	updates <- tgbotapi.Update{Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 1}, From: &tgbotapi.User{ID: 1}, Text: "hello"}}
+	close(updates)
+
+	if err := app.StartPolling(); err != nil {
+		t.Fatalf("StartPolling returned error: %v", err)
 	}
-	store := store.NewMemoryStore()
-	cfg := &Config{AllowedIDs: map[int64]bool{456: true}}
-	app := &BotApp{
-		tg:           mockTG,
-		oc:           mockOC,
-		store:        store,
-		cfg:          cfg,
-		octSessionID: "ses_oct",
+
+	if len(tg.sentMessages) != 3 {
+		t.Fatalf("expected 3 messages from allowed updates, got %d", len(tg.sentMessages))
 	}
-	ch := make(chan tgbotapi.Update, 1)
-	mockTG.updatesChan = ch
-	// Send a text update
-	go func() {
-		ch <- tgbotapi.Update{
-			Message: &tgbotapi.Message{
-				Chat: &tgbotapi.Chat{ID: 123},
-				From: &tgbotapi.User{ID: 456},
-				Text: "hello",
-			},
-		}
-		close(ch)
-	}()
-	err := app.StartPolling()
-	if err != nil {
-		t.Errorf("StartPolling error: %v", err)
+	if tg.sentMessages[0].Text != "Opencode: http://local" {
+		t.Fatalf("unexpected first message: %q", tg.sentMessages[0].Text)
 	}
-	if len(mockTG.sentMessages) != 1 {
-		t.Errorf("expected 1 message, got %d", len(mockTG.sentMessages))
+	if tg.sentMessages[1].Text != "Unknown command" {
+		t.Fatalf("unexpected second message: %q", tg.sentMessages[1].Text)
+	}
+	if tg.sentMessages[2].Text != "Running on Opencode..." {
+		t.Fatalf("unexpected run message: %q", tg.sentMessages[2].Text)
 	}
 }

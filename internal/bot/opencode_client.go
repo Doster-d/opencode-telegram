@@ -179,8 +179,6 @@ func (c *OpencodeClient) SubscribeEvents(handler func(map[string]any)) error {
 					var ev map[string]any
 					if err := json.Unmarshal([]byte(payload), &ev); err == nil {
 						handler(ev)
-					} else {
-						// try to parse as generic JSON array or other; ignore parse errors silently
 					}
 				}
 				dataLines = dataLines[:0]

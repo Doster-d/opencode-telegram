@@ -19,6 +19,10 @@ type DebouncerInterface interface {
 	Debounce(key string, text string, fn func(string) error)
 }
 
+var newTelegramBot = func(token string) (TelegramBotInterface, error) {
+	return tgbotapi.NewBotAPI(token)
+}
+
 type BotApp struct {
 	tg           TelegramBotInterface
 	cfg          *Config
@@ -29,7 +33,7 @@ type BotApp struct {
 }
 
 func NewBotApp(cfg *Config, oc OpencodeClientInterface, st store.Store) (*BotApp, error) {
-	bot, err := tgbotapi.NewBotAPI(cfg.TelegramToken)
+	bot, err := newTelegramBot(cfg.TelegramToken)
 	if err != nil {
 		return nil, err
 	}
