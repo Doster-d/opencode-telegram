@@ -24,6 +24,9 @@ func NewIdempotencyCache(maxEntries int, ttl time.Duration, nowFn func() time.Ti
 	if maxEntries <= 0 {
 		maxEntries = 1
 	}
+	if nowFn == nil {
+		nowFn = time.Now
+	}
 	return &IdempotencyCache{
 		maxEntries: maxEntries,
 		ttl:        ttl,

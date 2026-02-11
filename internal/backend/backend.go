@@ -281,6 +281,10 @@ func (b *MemoryBackend) RegisterCommandMeta(commandID string, meta commandMeta) 
 func (b *MemoryBackend) SetProject(userID string, record projectRecord) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.setProjectLocked(userID, record)
+}
+
+func (b *MemoryBackend) setProjectLocked(userID string, record projectRecord) {
 	if _, ok := b.projects[userID]; !ok {
 		b.projects[userID] = make(map[string]*projectRecord)
 	}
@@ -298,6 +302,10 @@ func (b *MemoryBackend) SetProject(userID string, record projectRecord) {
 func (b *MemoryBackend) UpdateProjectPolicy(userID string, projectID string, policy projectPolicy) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.updateProjectPolicyLocked(userID, projectID, policy)
+}
+
+func (b *MemoryBackend) updateProjectPolicyLocked(userID string, projectID string, policy projectPolicy) {
 	projects := b.projects[userID]
 	if projects == nil {
 		return
@@ -363,7 +371,7 @@ func (b *MemoryBackend) applyResultToProject(meta commandMeta, result contracts.
 			if p, ok := result.Meta["project_path"].(string); ok && p != "" {
 				projectPath = p
 			}
-			b.SetProject(meta.TelegramUserID, projectRecord{
+			b.setProjectLocked(meta.TelegramUserID, projectRecord{
 				Alias:       meta.Alias,
 				ProjectID:   projectID,
 				ProjectPath: projectPath,
@@ -383,7 +391,7 @@ func (b *MemoryBackend) applyResultToProject(meta commandMeta, result contracts.
 					policy.ExpiresAt = &exp
 				}
 			}
-			b.UpdateProjectPolicy(meta.TelegramUserID, meta.ProjectID, policy)
+			b.updateProjectPolicyLocked(meta.TelegramUserID, meta.ProjectID, policy)
 		}
 		return
 	}
