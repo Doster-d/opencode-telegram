@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"strings"
@@ -36,10 +37,9 @@ type MemoryBackend struct {
 	now             func() time.Time
 	pairingTTL      time.Duration
 	redeliveryAfter time.Duration
+	pairingStore    PairingPersistence
 
-	pairCounter  int
-	agentCounter int
-	keyCounter   int
+	pairCounter int
 
 	pairCodes       map[string]pairCodeRecord
 	agentByUser     map[string]string
@@ -52,6 +52,16 @@ type MemoryBackend struct {
 	projects map[string]map[string]*projectRecord
 	aliases  map[string]map[string]string
 	commands map[string]commandMeta
+}
+
+type PairingPersistence interface {
+	SavePairCode(code string, telegramUserID string, expiresAt time.Time) error
+	GetPairCode(code string) (telegramUserID string, expiresAt time.Time, ok bool, err error)
+	DeletePairCode(code string) error
+	SaveAgentBinding(telegramUserID string, agentID string, agentKey string) error
+	GetAgentIDByKey(agentKey string) (agentID string, ok bool, err error)
+	GetAgentIDByUser(telegramUserID string) (agentID string, ok bool, err error)
+	GetUserIDByAgent(agentID string) (telegramUserID string, ok bool, err error)
 }
 
 type pairCodeRecord struct {
@@ -116,6 +126,12 @@ func (b *MemoryBackend) SetPairingTTL(ttl time.Duration) {
 	b.pairingTTL = ttl
 }
 
+func (b *MemoryBackend) SetPairingPersistence(store PairingPersistence) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.pairingStore = store
+}
+
 func (b *MemoryBackend) StartPairing(telegramUserID string) (contracts.PairStartResponse, error) {
 	if strings.TrimSpace(telegramUserID) == "" {
 		return contracts.PairStartResponse{}, contracts.APIError{Code: contracts.ErrValidationRequiredField, Message: "telegram_user_id is required"}
@@ -127,6 +143,11 @@ func (b *MemoryBackend) StartPairing(telegramUserID string) (contracts.PairStart
 	code := fmt.Sprintf("PAIR-%06d", b.pairCounter)
 	expiresAt := b.now().UTC().Add(b.pairingTTL)
 	b.pairCodes[code] = pairCodeRecord{TelegramUserID: telegramUserID, ExpiresAt: expiresAt}
+	if b.pairingStore != nil {
+		if err := b.pairingStore.SavePairCode(code, telegramUserID, expiresAt); err != nil {
+			return contracts.PairStartResponse{}, err
+		}
+	}
 	return contracts.PairStartResponse{PairingCode: code, ExpiresAt: expiresAt}, nil
 }
 
@@ -138,10 +159,26 @@ func (b *MemoryBackend) ClaimPairing(req contracts.PairClaimRequest) (contracts.
 	defer b.mu.Unlock()
 
 	rec, ok := b.pairCodes[req.PairingCode]
+	if b.pairingStore != nil {
+		userID, expiresAt, found, err := b.pairingStore.GetPairCode(req.PairingCode)
+		if err != nil {
+			return contracts.PairClaimResponse{}, err
+		}
+		if !found {
+			return contracts.PairClaimResponse{}, contracts.APIError{Code: contracts.ErrPairingInvalidCode, Message: "pairing code not found"}
+		}
+		rec = pairCodeRecord{TelegramUserID: userID, ExpiresAt: expiresAt}
+		ok = true
+	}
 	if !ok {
 		return contracts.PairClaimResponse{}, contracts.APIError{Code: contracts.ErrPairingInvalidCode, Message: "pairing code not found"}
 	}
 	delete(b.pairCodes, req.PairingCode)
+	if b.pairingStore != nil {
+		if err := b.pairingStore.DeletePairCode(req.PairingCode); err != nil {
+			return contracts.PairClaimResponse{}, err
+		}
+	}
 	if b.now().UTC().After(rec.ExpiresAt) {
 		return contracts.PairClaimResponse{}, contracts.APIError{Code: contracts.ErrPairingExpired, Message: "pairing code expired"}
 	}
@@ -153,17 +190,35 @@ func (b *MemoryBackend) ClaimPairing(req contracts.PairClaimRequest) (contracts.
 		delete(b.agentKeyByAgent, oldAgentID)
 	}
 
-	b.agentCounter++
-	b.keyCounter++
-	agentID := fmt.Sprintf("agent-%06d", b.agentCounter)
-	agentKey := fmt.Sprintf("key-%06d", b.keyCounter)
+	agentID, err := newUUIDv4()
+	if err != nil {
+		return contracts.PairClaimResponse{}, contracts.APIError{Code: contracts.ErrInternal, Message: "failed to generate agent id"}
+	}
+	agentKey, err := newUUIDv4()
+	if err != nil {
+		return contracts.PairClaimResponse{}, contracts.APIError{Code: contracts.ErrInternal, Message: "failed to generate agent key"}
+	}
 	b.agentByUser[rec.TelegramUserID] = agentID
 	b.agentKeyByAgent[agentID] = agentKey
 	b.agentByKey[agentKey] = agentID
+	if b.pairingStore != nil {
+		if err := b.pairingStore.SaveAgentBinding(rec.TelegramUserID, agentID, agentKey); err != nil {
+			return contracts.PairClaimResponse{}, err
+		}
+	}
 	return contracts.PairClaimResponse{AgentID: agentID, AgentKey: agentKey}, nil
 }
 
 func (b *MemoryBackend) AuthenticateAgentKey(agentKey string) (string, bool) {
+	if b.pairingStore != nil {
+		agentID, ok, err := b.pairingStore.GetAgentIDByKey(agentKey)
+		if err == nil && ok {
+			return agentID, true
+		}
+		if err == nil {
+			return "", false
+		}
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	agentID, ok := b.agentByKey[agentKey]
@@ -171,6 +226,15 @@ func (b *MemoryBackend) AuthenticateAgentKey(agentKey string) (string, bool) {
 }
 
 func (b *MemoryBackend) AgentIDForUser(telegramUserID string) (string, bool) {
+	if b.pairingStore != nil {
+		agentID, ok, err := b.pairingStore.GetAgentIDByUser(telegramUserID)
+		if err == nil && ok {
+			return agentID, true
+		}
+		if err == nil {
+			return "", false
+		}
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	agentID, ok := b.agentByUser[telegramUserID]
@@ -178,6 +242,15 @@ func (b *MemoryBackend) AgentIDForUser(telegramUserID string) (string, bool) {
 }
 
 func (b *MemoryBackend) UserIDForAgent(agentID string) (string, bool) {
+	if b.pairingStore != nil {
+		userID, ok, err := b.pairingStore.GetUserIDByAgent(agentID)
+		if err == nil && ok {
+			return userID, true
+		}
+		if err == nil {
+			return "", false
+		}
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for userID, agent := range b.agentByUser {
@@ -395,4 +468,14 @@ func (b *MemoryBackend) applyResultToProject(meta commandMeta, result contracts.
 		}
 		return
 	}
+}
+
+func newUUIDv4() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
 }

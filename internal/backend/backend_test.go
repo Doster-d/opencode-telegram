@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"testing"
 	"time"
 
@@ -74,6 +75,14 @@ func TestACMVP05OneActiveAgentReplacement(t *testing.T) {
 	}
 	if _, ok := b.AuthenticateAgentKey(claimB.AgentKey); !ok {
 		t.Fatal("expected new key to be valid")
+	}
+
+	uuidRe := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	if !uuidRe.MatchString(claimB.AgentID) {
+		t.Fatalf("expected uuidv4 agent_id, got %q", claimB.AgentID)
+	}
+	if !uuidRe.MatchString(claimB.AgentKey) {
+		t.Fatalf("expected uuidv4 agent_key, got %q", claimB.AgentKey)
 	}
 }
 

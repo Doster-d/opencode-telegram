@@ -15,6 +15,14 @@ func main() {
 	}
 
 	mem := backend.NewMemoryBackend()
+	if dsn := os.Getenv("POSTGRES_DSN"); dsn != "" {
+		pgStore, err := backend.NewPostgresPairingStore(dsn)
+		if err != nil {
+			log.Fatalf("postgres init error: %v", err)
+		}
+		mem.SetPairingPersistence(pgStore)
+		log.Printf("pairing store: postgres")
+	}
 	redisURL := os.Getenv("REDIS_URL")
 	if redisURL == "" {
 		redisURL = "redis://localhost:6379"
