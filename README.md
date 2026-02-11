@@ -1,135 +1,147 @@
-# Opencode Telegram Bot
+# Opencode Telegram
 
-Telegram bot that routes chat commands/messages to an Opencode server and streams updates back into Telegram.
+Telegram-driven control plane for local OpenCode execution through a backend and a local agent daemon.
 
-## What this repo contains
+Current version: `0.2.0` (stored in `VERSION`).
 
-- `cmd/opencode-bot/main.go`: process entrypoint (config + wiring + polling/event loops).
-- `internal/bot`: application logic (Telegram command handlers, Opencode HTTP/SSE client, config parsing, debounce/event glue).
-- `pkg/store`: in-memory session mapping abstraction used by handlers.
-- `Taskfile.yml`: local command entrypoints for build/test/lint/coverage.
-- `.github/workflows/go.yml`: CI quality gates (build, tests, lint, coverage threshold).
+## What this repository contains
+
+- `cmd/opencode-bot`: Telegram bot process.
+- `cmd/oct-backend`: backend API (`/v1/pair/*`, `/v1/command`, `/v1/poll`, `/v1/result`, project/result helpers).
+- `cmd/oct-agent`: local daemon that long-polls backend and executes commands.
+- `internal/bot`: Telegram command handlers, approval UX, backend routing, Opencode client integration.
+- `internal/backend`: pairing state, queue abstraction, Redis queue implementation, HTTP handlers.
+- `internal/agent`: command dispatcher, policy enforcement, port allocation, OpenCode lifecycle.
+- `internal/proxy/contracts`: shared command/result contracts and validation.
+- `pkg/store`: in-memory store interfaces/implementation used by the bot.
 
 ## Documentation
 
-- Documentation hub: `docs/README.md`
+- Docs hub: `docs/README.md`
 - Spec index: `docs/spec/spec-index.md`
-- Local development runbook: `docs/spec/runbooks/local-dev.md`
+- MVP feature spec: `docs/spec/features/telegram-backend-daemon-mvp.md`
 
 ## Prerequisites
 
-- Go 1.20+
-- [Task](https://taskfile.dev/installation/) (recommended command runner for this repo)
-- Telegram bot token from [@BotFather](https://t.me/botfather)
-- Reachable Opencode server
-- Optional: `golangci-lint` (auto-installed via `task lint:install`)
+- Go `1.20+`
+- Redis (default expected at `redis://localhost:6379`)
+- Telegram bot token from BotFather
+- `opencode` CLI available on the machine where `oct-agent` runs
+- Optional: `task` command runner
 
-## Setup
+## Environment variables
 
-1. Copy env template:
+### Bot (`cmd/opencode-bot`)
+
+- Required:
+  - `TELEGRAM_BOT_TOKEN`
+- Common:
+  - `OCT_BACKEND_URL` (default `http://localhost:8080`)
+  - `ALLOWED_TELEGRAM_IDS`
+  - `ADMIN_TELEGRAM_IDS`
+  - `OPENCODE_BASE_URL` (used by existing bot paths)
+  - `OPENCODE_AUTH_TOKEN`
+  - `SESSION_PREFIX` (default `oct_`)
+  - `TELEGRAM_MODE` (only `polling` is implemented)
+
+### Backend (`cmd/oct-backend`)
+
+- `OCT_BACKEND_ADDR` (default `:8080`)
+- `REDIS_URL` (default `redis://localhost:6379`)
+
+### Agent (`cmd/oct-agent`)
+
+- Required:
+  - `OCT_AGENT_KEY`
+- Optional:
+  - `OCT_AGENT_ID`
+  - `OCT_BACKEND_URL` (default `http://localhost:8080`)
+  - `OCT_AGENT_ADDR` (default `:9090`)
+
+## First 15 minutes (fresh machine)
+
+1. Install dependencies and verify toolchain:
+
+```bash
+go version
+redis-server --version
+```
+
+2. Copy env template and set bot values:
 
 ```bash
 cp .env.example .env
 ```
 
-2. Set required values in `.env`:
-
-```env
-TELEGRAM_BOT_TOKEN=your-bot-token
-OPENCODE_BASE_URL=http://localhost:4096
-ALLOWED_TELEGRAM_IDS=your-telegram-user-id
-ADMIN_TELEGRAM_IDS=your-telegram-user-id
-```
-
-3. Build once:
+3. Run baseline tests:
 
 ```bash
-task build
+go test ./...
 ```
 
-4. Run locally:
+4. Start backend:
 
 ```bash
-task dev
+go run ./cmd/oct-backend
 ```
 
-## Run, Test, Lint, Coverage
+5. Start bot:
 
-- Run app: `task dev`
-- Build binary: `task build`
-- Unit tests: `task test`
-- Verbose tests: `task test:verbose`
-- Install pinned linter binary: `task lint:install`
-- Lint: `task lint`
-- Coverage profile + report input: `task coverage`
-- Coverage quality gate (>= 90% on `internal/...` and `pkg/...`): `task coverage:check`
-- HTML coverage report (after `task coverage`): `task coverage:html`
-- CI-parity local check (same intent as `.github/workflows/go.yml`): `task ci`
+```bash
+go run ./cmd/opencode-bot
+```
 
-CI runs the same quality intent: build, `go test`, `golangci-lint`, and coverage threshold validation.
+6. Pair and run agent (after obtaining `agent_key` via pairing flow):
 
-If you do not want to install Task, run direct Go commands instead:
+```bash
+OCT_AGENT_KEY=<agent_key> go run ./cmd/oct-agent
+```
 
-- Build (CI-style): `go build -v ./...`
-- Unit tests (CI-style): `go test -v ./...`
-- Lint: `go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8 && "$(go env GOPATH)/bin/golangci-lint" run --config .golangci.yml ./...`
+## Common development commands
+
+Using Go directly:
+
+- Build all: `go build -v ./...`
+- Test all: `go test -v ./...`
 - Coverage gate: `go test -covermode=count -coverprofile=coverage.out ./internal/... ./pkg/... && go run ./cmd/coveragecheck -file coverage.out -min 90`
 
-## First 15 Minutes Checklist
+Using Task (bot-oriented helpers already present in repo):
 
-1. Confirm toolchain: `go version` (1.20+).
-2. Install Task (`task --version`) or use the direct Go commands listed above.
-3. Copy `.env.example` to `.env` and set real values.
-4. Run `task test` to confirm baseline health.
-5. Run `task lint:install` once, then `task lint`.
-6. Run `task ci` to mirror CI checks locally.
-7. Start app with `task dev` and send `/status` from an allowed Telegram user.
+- `task dev`
+- `task test`
+- `task lint`
+- `task ci`
+
+## Release workflow
+
+- CI checks are in `.github/workflows/go.yml`.
+- Tag push workflow is in `.github/workflows/release.yml`.
+- Pushing a tag `vX.Y.Z` (for example `v0.2.0`) triggers:
+  - test verification,
+  - cross-platform `oct-agent` build,
+  - archive packaging (`.tar.gz` / `.zip`),
+  - `SHA256SUMS` generation,
+  - GitHub Release publish with artifacts.
+
+## Versioning
+
+- Source of truth: `VERSION`.
+- Current version: `0.2.0`.
+- Release tags must match versioning format `vX.Y.Z`.
 
 ## Troubleshooting
 
 - `TELEGRAM_BOT_TOKEN is required`
-  - `.env` is missing or not loaded; set `TELEGRAM_BOT_TOKEN` and retry.
+  - Set `TELEGRAM_BOT_TOKEN` before running `cmd/opencode-bot`.
 
-- `telegram bot init error`
-  - Token is invalid or network cannot reach Telegram API.
+- `redis init error` on backend start
+  - Verify Redis is running and `REDIS_URL` is reachable.
 
-- `event listener error` / no streaming edits
-  - Check `OPENCODE_BASE_URL` reachability and Opencode event endpoint behavior.
+- Agent exits with `OCT_AGENT_KEY is required`
+  - Complete pairing first and export `OCT_AGENT_KEY`.
 
-- `task lint` fails with `command not found: golangci-lint`
-  - Run `task lint:install`. `task lint` also falls back to `$(go env GOPATH)/bin/golangci-lint` if not on `PATH`.
-  - Optional: add `$(go env GOPATH)/bin` to your shell `PATH` for direct `golangci-lint` usage.
+- Bot returns "Unknown project alias"
+  - Use `/project list` and run commands with the registered alias.
 
-- Coverage gate fails
-  - Run `task coverage:check` locally; target uncovered logic in `internal/bot` first.
-
-## How to Program in This Go Project
-
-- Keep behavior in `internal/bot`; keep `cmd/opencode-bot/main.go` as wiring only.
-- Treat Telegram handlers (`handleStatus`, `handleRun`, etc.) as command boundaries: parse inputs, call `OpencodeClientInterface`, and emit user-visible text.
-- Preserve interface seams for testability:
-  - Telegram calls through `TelegramBotInterface`
-  - Opencode calls through `OpencodeClientInterface`
-  - persistence through `store.Store`
-- When adding command behavior:
-  1. Add/adjust a focused unit test in `internal/bot/*_test.go`.
-  2. Implement minimal handler/client change.
-  3. Run `task test`, `task lint`, `task coverage:check`.
-- Prefer deterministic tests:
-  - Use mock clients/bots instead of real network calls.
-  - Keep async tests bounded (channels/timeouts) and avoid long sleeps.
-- Keep diffs small and reversible; avoid unrelated refactors while touching quality gates.
-
-## Environment Variables
-
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `TELEGRAM_BOT_TOKEN` | yes | - | Bot token from BotFather |
-| `OPENCODE_BASE_URL` | no | `http://localhost:4096` | Opencode server URL |
-| `OPENCODE_AUTH_TOKEN` | no | - | Optional bearer token for Opencode |
-| `ALLOWED_TELEGRAM_IDS` | no | - | Comma/space-separated user IDs; empty allows all |
-| `ADMIN_TELEGRAM_IDS` | no | - | Comma/space-separated admin IDs |
-| `SESSION_PREFIX` | no | `oct_` | Prefix used for persistent session discovery/creation |
-| `TELEGRAM_MODE` | no | `polling` | Polling is implemented; webhook is not yet implemented |
-| `PORT` | no | `3000` | Reserved listen port for webhook mode |
-| `REDIS_URL` | no | - | Reserved for non-memory store implementation |
+- Commands time out during `start_server`/`run_task`
+  - Confirm `opencode` binary exists and local health endpoint is reachable by agent.
