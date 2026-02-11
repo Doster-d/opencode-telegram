@@ -1,0 +1,11 @@
+FROM golang:1.20-alpine AS builder
+RUN apk add --no-cache git
+WORKDIR /src
+COPY . .
+ENV CGO_ENABLED=0
+RUN go build -o /out/opencode-bot ./cmd/opencode-bot
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /out/opencode-bot /usr/local/bin/opencode-bot
+ENTRYPOINT ["/usr/local/bin/opencode-bot"]

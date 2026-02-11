@@ -48,6 +48,7 @@ Current version: `0.2.0` (stored in `VERSION`).
 
 - `OCT_BACKEND_ADDR` (default `:8080`)
 - `REDIS_URL` (default `redis://localhost:6379`)
+- `POSTGRES_DSN` (optional; when set, pairing/auth state persists in PostgreSQL)
 
 ### Agent (`cmd/oct-agent`)
 
@@ -122,6 +123,35 @@ Using Task (bot-oriented helpers already present in repo):
   - archive packaging (`.tar.gz` / `.zip`),
   - `SHA256SUMS` generation,
   - GitHub Release publish with artifacts.
+
+## Docker Compose (minimal ports)
+
+The repository includes `docker-compose.yml` with these services:
+
+- `postgres` (internal only, persistent volume `pgdata`)
+- `redis` (internal only)
+- `backend` (only host-exposed port: `127.0.0.1:8080`)
+- `bot` (polling mode, no host port)
+- `agent` (optional profile `agent`, no host port)
+
+Quick start:
+
+```bash
+export TELEGRAM_BOT_TOKEN=<your_token>
+docker compose up -d --build postgres redis backend bot
+```
+
+Optional agent start (after pairing and obtaining `OCT_AGENT_KEY`):
+
+```bash
+export OCT_AGENT_KEY=<agent_key>
+docker compose --profile agent up -d --build --no-deps agent
+```
+
+Manual check endpoints from host:
+
+- Backend health flow and API checks use `http://127.0.0.1:8080`.
+- PostgreSQL, Redis, bot, and agent are not exposed to host by default.
 
 ## Versioning
 

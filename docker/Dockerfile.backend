@@ -1,0 +1,11 @@
+FROM golang:1.20-alpine AS builder
+RUN apk add --no-cache git
+WORKDIR /src
+COPY . .
+ENV CGO_ENABLED=0
+RUN go build -o /out/oct-backend ./cmd/oct-backend
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /out/oct-backend /usr/local/bin/oct-backend
+ENTRYPOINT ["/usr/local/bin/oct-backend"]

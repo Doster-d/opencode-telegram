@@ -1,0 +1,78 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: opencode
+      POSTGRES_USER: opencode
+      POSTGRES_PASSWORD: opencode
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opencode -d opencode"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    restart: unless-stopped
+    environment:
+      OCT_BACKEND_ADDR: ":8080"
+      REDIS_URL: redis://redis:6379
+      POSTGRES_DSN: postgres://opencode:opencode@postgres:5432/opencode?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  bot:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.bot
+    restart: unless-stopped
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      OCT_BACKEND_URL: http://backend:8080
+      TELEGRAM_MODE: polling
+      ALLOWED_TELEGRAM_IDS: ${ALLOWED_TELEGRAM_IDS:-}
+      ADMIN_TELEGRAM_IDS: ${ADMIN_TELEGRAM_IDS:-}
+      OPENCODE_BASE_URL: ${OPENCODE_BASE_URL:-http://localhost:4096}
+      OPENCODE_AUTH_TOKEN: ${OPENCODE_AUTH_TOKEN:-}
+      SESSION_PREFIX: ${SESSION_PREFIX:-oct_}
+    depends_on:
+      backend:
+        condition: service_started
+
+  agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.agent
+    restart: unless-stopped
+    environment:
+      OCT_BACKEND_URL: http://backend:8080
+      OCT_AGENT_KEY: ${OCT_AGENT_KEY:-}
+      OCT_AGENT_ID: ${OCT_AGENT_ID:-}
+      OCT_AGENT_ADDR: ":9090"
+    depends_on:
+      backend:
+        condition: service_started
+    profiles: ["agent"]
+
+volumes:
+  pgdata:
