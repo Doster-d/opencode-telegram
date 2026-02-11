@@ -35,4 +35,4 @@ jobs:
       - name: Coverage gate
         run: |
           go test -covermode=count -coverprofile=coverage.out ./internal/... ./pkg/...
-          go run ./cmd/coveragecheck -file coverage.out -min 50
+          go run ./cmd/coveragecheck -file coverage.out -min 90

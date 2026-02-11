@@ -103,7 +103,7 @@ Using Go directly:
 
 - Build all: `go build -v ./...`
 - Test all: `go test -v ./...`
-- Coverage gate: `go test -covermode=count -coverprofile=coverage.out ./internal/... ./pkg/... && go run ./cmd/coveragecheck -file coverage.out -min 50`
+- Coverage gate: `go test -covermode=count -coverprofile=coverage.out ./internal/... ./pkg/... && go run ./cmd/coveragecheck -file coverage.out -min 90`
 
 Using Task (bot-oriented helpers already present in repo):
 
