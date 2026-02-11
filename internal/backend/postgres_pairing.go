@@ -7,12 +7,14 @@ import (
 	_ "github.com/lib/pq"
 )
 
+var sqlOpen = sql.Open
+
 type PostgresPairingStore struct {
 	db *sql.DB
 }
 
 func NewPostgresPairingStore(dsn string) (*PostgresPairingStore, error) {
-	db, err := sql.Open("postgres", dsn)
+	db, err := sqlOpen("postgres", dsn)
 	if err != nil {
 		return nil, err
 	}
