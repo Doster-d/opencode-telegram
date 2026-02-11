@@ -1,7 +1,11 @@
 package bot
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"opencode-telegram/internal/proxy/contracts"
 	"opencode-telegram/pkg/store"
 	"strconv"
 	"strings"
@@ -36,6 +40,46 @@ type BotApp struct {
 	activeRuns   map[string]string
 	runOwners    map[string]string
 	sleep        func(time.Duration)
+
+	// Backend client for command routing
+	backendURL string
+	httpClient *http.Client
+
+	listProjectsFn func(userID int64) ([]projectRecord, error)
+}
+
+type approvalDecision struct {
+	Decision  string     `json:"decision"`
+	ExpiresAt *time.Time `json:"expires_at"`
+	Scope     []string   `json:"scope"`
+}
+
+type projectRecord struct {
+	Alias       string           `json:"alias"`
+	ProjectID   string           `json:"project_id"`
+	ProjectPath string           `json:"project_path"`
+	Policy      approvalDecision `json:"policy"`
+	LastUpdated time.Time        `json:"last_updated"`
+}
+
+type approvalRequest struct {
+	TelegramUserID int64     `json:"telegram_user_id"`
+	ProjectID      string    `json:"project_id"`
+	Alias          string    `json:"alias"`
+	Scopes         []string  `json:"scopes"`
+	RequestedAt    time.Time `json:"requested_at"`
+}
+
+type commandRecord struct {
+	CommandID string    `json:"command_id"`
+	Type      string    `json:"type"`
+	ProjectID string    `json:"project_id"`
+	Alias     string    `json:"alias"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type storedCommands struct {
+	Commands []commandRecord `json:"commands"`
 }
 
 func NewBotApp(cfg *Config, oc OpencodeClientInterface, st store.Store) (*BotApp, error) {
@@ -44,14 +88,17 @@ func NewBotApp(cfg *Config, oc OpencodeClientInterface, st store.Store) (*BotApp
 		return nil, err
 	}
 	app := &BotApp{
-		tg:         bot,
-		cfg:        cfg,
-		oc:         oc,
-		store:      st,
-		debouncer:  NewDebouncer(500 * time.Millisecond),
-		activeRuns: make(map[string]string),
-		runOwners:  make(map[string]string),
-		sleep:      time.Sleep,
+		tg:             bot,
+		cfg:            cfg,
+		oc:             oc,
+		store:          st,
+		debouncer:      NewDebouncer(500 * time.Millisecond),
+		activeRuns:     make(map[string]string),
+		runOwners:      make(map[string]string),
+		sleep:          time.Sleep,
+		backendURL:     cfg.BackendURL,
+		httpClient:     &http.Client{Timeout: 30 * time.Second},
+		listProjectsFn: nil,
 	}
 
 	// Find or create persistent session whose title starts with configured prefix
@@ -139,13 +186,36 @@ func (a *BotApp) StartPolling() error {
 			case "mysession":
 				a.handleMySession(upd.Message.Chat.ID, userID)
 			case "status":
-				a.handleStatus(upd.Message.Chat.ID)
+				a.handleAgentStatus(upd.Message.Chat.ID, userID)
 			case "sessions":
 				a.handleSessions(upd.Message.Chat.ID)
 			case "run":
 				a.handleRun(upd.Message.Chat.ID, args, userID)
 			case "abort":
 				a.handleAbort(upd.Message.Chat.ID, args, userID)
+			case "project":
+				// Handle /project add/list subcommand
+				fields := strings.Fields(args)
+				if len(fields) == 0 {
+					a.tg.Send(tgbotapi.NewMessage(upd.Message.Chat.ID, "Usage: /project add <ABS_PATH> | /project list"))
+					break
+				}
+				sub := fields[0]
+				rest := strings.TrimSpace(strings.TrimPrefix(args, sub))
+				switch sub {
+				case "add":
+					a.handleProjectAdd(upd.Message.Chat.ID, rest, userID)
+				case "list":
+					a.handleProjectList(upd.Message.Chat.ID, userID)
+				default:
+					a.tg.Send(tgbotapi.NewMessage(upd.Message.Chat.ID, "Usage: /project add <ABS_PATH> | /project list"))
+				}
+			case "start_server":
+				a.handleStartServer(upd.Message.Chat.ID, args, userID)
+			case "pair":
+				a.startPairing(upd.Message.Chat.ID, userID)
+			case "agent_status":
+				a.handleAgentStatus(upd.Message.Chat.ID, userID)
 			default:
 				a.tg.Send(tgbotapi.NewMessage(upd.Message.Chat.ID, "Unknown command"))
 			}
@@ -224,6 +294,11 @@ func (a *BotApp) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		return
 	}
 
+	if strings.HasPrefix(cb.Data, "approve:") {
+		a.handleApprovalDecision(cb)
+		return
+	}
+
 	switch cb.Data {
 	case "settings:language":
 		a.handleLanguage(cb.Message.Chat.ID)
@@ -233,6 +308,101 @@ func (a *BotApp) handleCallbackQuery(cb *tgbotapi.CallbackQuery) {
 		a.handleUnmute(cb.Message.Chat.ID)
 	default:
 		a.tg.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "Unknown settings action."))
+	}
+}
+
+func (a *BotApp) handleApprovalDecision(cb *tgbotapi.CallbackQuery) {
+	if cb.Message == nil || cb.From == nil {
+		return
+	}
+	parts := strings.Split(cb.Data, "|")
+	if len(parts) < 2 {
+		a.tg.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "Invalid approval payload."))
+		return
+	}
+	decisionPart := strings.TrimPrefix(parts[0], "approve:")
+	alias := parts[1]
+	project, err := a.resolveProject(cb.From.ID, alias)
+	if err != nil || project == nil {
+		a.tg.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "Unable to resolve project for approval."))
+		return
+	}
+	decision := contracts.DecisionDeny
+	var expiresAt *time.Time
+	scopes := []string{}
+	switch decisionPart {
+	case "deny":
+		decision = contracts.DecisionDeny
+	case "allow30:start":
+		decision = contracts.DecisionAllow
+		exp := time.Now().UTC().Add(30 * time.Minute)
+		expiresAt = &exp
+		scopes = []string{contracts.ScopeStartServer}
+	case "allow30:both":
+		decision = contracts.DecisionAllow
+		exp := time.Now().UTC().Add(30 * time.Minute)
+		expiresAt = &exp
+		scopes = []string{contracts.ScopeStartServer, contracts.ScopeRunTask}
+	case "allow:both":
+		decision = contracts.DecisionAllow
+		scopes = []string{contracts.ScopeStartServer, contracts.ScopeRunTask}
+	default:
+		decision = contracts.DecisionDeny
+	}
+	agentKey, ok := a.store.GetUserAgentKey(cb.From.ID)
+	if !ok || agentKey == "" {
+		a.tg.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "You are not paired. Use /project add to pair first."))
+		return
+	}
+	commandID := fmt.Sprintf("cmd-%d", time.Now().UnixNano())
+	payload := map[string]any{
+		"project_id": project.ProjectID,
+		"decision":   decision,
+		"scope":      scopes,
+	}
+	if expiresAt != nil {
+		payload["expires_at"] = expiresAt.Format(time.RFC3339Nano)
+	}
+	cmd := map[string]any{
+		"type":            contracts.CommandTypeApplyProjectPolicy,
+		"command_id":      commandID,
+		"idempotency_key": fmt.Sprintf("key-%d", time.Now().UnixNano()),
+		"created_at":      time.Now().UTC().Format(time.RFC3339Nano),
+		"payload":         payload,
+	}
+	cmdBody, _ := json.Marshal(cmd)
+	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/v1/command", a.backendURL), bytes.NewBuffer(cmdBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+agentKey)
+	req.Header.Set("X-Telegram-User-ID", strconv.FormatInt(cb.From.ID, 10))
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		a.tg.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "Failed to send approval: "+err.Error()))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		var errResp map[string]any
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		a.tg.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, fmt.Sprintf("Failed to queue approval: %v", errResp)))
+		return
+	}
+	a.storeCommand(cb.From.ID, commandRecord{CommandID: commandID, Type: contracts.CommandTypeApplyProjectPolicy, ProjectID: project.ProjectID, Alias: project.Alias, CreatedAt: time.Now().UTC()})
+	a.tg.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, fmt.Sprintf("Policy updated for %s.", project.Alias)))
+	// Optimistically update local view
+	a.updateLocalPolicy(cb.From.ID, project.ProjectID, decision, scopes, expiresAt)
+}
+
+func (a *BotApp) updateLocalPolicy(userID int64, projectID string, decision string, scopes []string, expiresAt *time.Time) {
+	projects, err := a.listProjects(userID)
+	if err != nil {
+		return
+	}
+	for _, p := range projects {
+		if p.ProjectID != projectID {
+			continue
+		}
+		break
 	}
 }
 
@@ -460,42 +630,7 @@ func (a *BotApp) handleMySession(chatID int64, userID int64) {
 	a.tg.Send(tgbotapi.NewMessage(chatID, "You have not selected a session. Use /selectsession <id|title_prefix>"))
 }
 
-func (a *BotApp) handleRun(chatID int64, prompt string, userID int64) {
-	if prompt == "" {
-		a.tg.Send(tgbotapi.NewMessage(chatID, "Usage: /run <prompt>"))
-		return
-	}
-
-	sid, selectedInvalid, err := a.resolveUserSession(userID)
-	if err != nil {
-		if selectedInvalid {
-			a.tg.Send(tgbotapi.NewMessage(chatID, "Your selected session is no longer available. Use /selectsession or /createsession to choose a valid session."))
-			return
-		}
-		a.tg.Send(tgbotapi.NewMessage(chatID, "Error resolving session: "+err.Error()))
-		return
-	}
-
-	if !a.tryStartRun(chatID, userID, sid) {
-		a.tg.Send(tgbotapi.NewMessage(chatID, "A run is already active for you in this chat. Use /abort or wait for it to finish."))
-		return
-	}
-
-	// Send initial message to Telegram showing it's running
-	sent, _ := a.tg.Send(tgbotapi.NewMessage(chatID, "Running on Opencode..."))
-	a.store.SetSession(sid, chatID, sent.MessageID)
-
-	// Send prompt
-	_, err = a.oc.PromptSession(sid, prompt)
-	if err != nil {
-		a.tg.Send(tgbotapi.NewMessage(chatID, "Error prompting session: "+err.Error()))
-		a.clearRun(chatID, userID)
-		return
-	}
-
-	// TODO: subscribe to SSE and edit message with parts as they arrive
-	// a.tg.Send(tgbotapi.NewMessage(chatID, "Started session: "+sid))
-}
+// handleRun now routes to backend run_task command.
 
 func (a *BotApp) handleAbort(chatID int64, args string, userID int64) {
 	if args == "" {
@@ -513,4 +648,509 @@ func (a *BotApp) handleAbort(chatID int64, args string, userID int64) {
 		return
 	}
 	a.tg.Send(tgbotapi.NewMessage(chatID, "Aborted session: "+args))
+}
+
+// handleProjectAdd initiates pairing and registers a project
+func (a *BotApp) handleProjectAdd(chatID int64, args string, userID int64) {
+	// Check if user is already paired
+	agentKey, ok := a.store.GetUserAgentKey(userID)
+	if ok && agentKey != "" {
+		if strings.TrimSpace(args) == "" {
+			a.tg.Send(tgbotapi.NewMessage(chatID, "Usage: /project add <ABS_PATH>"))
+			return
+		}
+		projectPath := strings.TrimSpace(args)
+		a.enqueueProjectRegister(chatID, userID, agentKey, projectPath)
+		return
+	}
+
+	// Not paired yet - either claim existing pairing code or start new
+	telegramUserID := strconv.FormatInt(userID, 10)
+	if code, ok := a.store.GetPairingCode(telegramUserID); ok && code != "" {
+		a.claimPairing(chatID, userID, code)
+		return
+	}
+	// initiate pairing flow
+	a.startPairing(chatID, userID)
+}
+
+func (a *BotApp) startPairing(chatID int64, userID int64) {
+	telegramUserID := strconv.FormatInt(userID, 10)
+	reqBody, _ := json.Marshal(map[string]string{"telegram_user_id": telegramUserID})
+	resp, err := a.httpClient.Post(
+		fmt.Sprintf("%s/v1/pair/start", a.backendURL),
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Failed to initiate pairing: "+err.Error()))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		var errResp map[string]any
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		a.tg.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Pairing failed: %v", errResp)))
+		return
+	}
+
+	var pairResp map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&pairResp); err != nil {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Failed to parse pairing response"))
+		return
+	}
+
+	pairingCode, _ := pairResp["pairing_code"].(string)
+	expiresAt, _ := pairResp["expires_at"].(string)
+	_ = a.store.SetPairingCode(telegramUserID, pairingCode)
+
+	msg := fmt.Sprintf("Pairing initiated!\n\nPairing Code: `%s`\n\nExpires at: %s\n\nRun the following on your machine to complete pairing:\n\n`oct-agent pair %s`",
+		pairingCode, expiresAt, pairingCode)
+	a.tg.Send(tgbotapi.NewMessage(chatID, msg))
+}
+
+func (a *BotApp) claimPairing(chatID int64, userID int64, pairingCode string) {
+	reqBody, _ := json.Marshal(map[string]string{"pairing_code": pairingCode, "device_info": "telegram"})
+	resp, err := a.httpClient.Post(
+		fmt.Sprintf("%s/v1/pair/claim", a.backendURL),
+		"application/json",
+		bytes.NewBuffer(reqBody),
+	)
+	if err != nil {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Failed to claim pairing: "+err.Error()))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var errResp map[string]any
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		a.tg.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Pairing claim failed: %v", errResp)))
+		return
+	}
+	var claimResp map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&claimResp); err != nil {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Failed to parse pairing claim response"))
+		return
+	}
+	agentKey, _ := claimResp["agent_key"].(string)
+	if agentKey == "" {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Pairing claim returned no agent key"))
+		return
+	}
+	_ = a.store.SetUserAgentKey(userID, agentKey)
+	a.tg.Send(tgbotapi.NewMessage(chatID, "Pairing completed. You can now add projects."))
+}
+
+func (a *BotApp) enqueueProjectRegister(chatID int64, userID int64, agentKey string, projectPath string) {
+	alias := strings.TrimSpace(projectAliasFromPath(projectPath))
+	if alias == "" {
+		alias = fmt.Sprintf("project-%d", time.Now().Unix())
+	}
+	cmd := map[string]any{
+		"type":            contracts.CommandTypeRegisterProject,
+		"command_id":      fmt.Sprintf("cmd-%d", time.Now().UnixNano()),
+		"idempotency_key": fmt.Sprintf("key-%d", time.Now().UnixNano()),
+		"created_at":      time.Now().UTC().Format(time.RFC3339Nano),
+		"payload": map[string]string{
+			"project_path_raw": projectPath,
+		},
+	}
+	commandID := cmd["command_id"].(string)
+	cmdBody, _ := json.Marshal(cmd)
+	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/v1/command", a.backendURL), bytes.NewBuffer(cmdBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+agentKey)
+	req.Header.Set("X-Telegram-User-ID", strconv.FormatInt(userID, 10))
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Failed to send command: "+err.Error()))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusAccepted {
+		a.storeCommand(userID, commandRecord{CommandID: commandID, Type: contracts.CommandTypeRegisterProject, Alias: alias, CreatedAt: time.Now().UTC()})
+		a.tg.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Project registration queued for %s (alias: %s).", projectPath, alias)))
+		return
+	}
+	var errResp map[string]any
+	json.NewDecoder(resp.Body).Decode(&errResp)
+	a.tg.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Failed to queue project registration: %v", errResp)))
+}
+
+func projectAliasFromPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	path = strings.TrimRight(path, "/")
+	if path == "" {
+		return ""
+	}
+	parts := strings.Split(path, "/")
+	return strings.TrimSpace(parts[len(parts)-1])
+}
+
+func (a *BotApp) handleProjectList(chatID int64, userID int64) {
+	entries, err := a.listProjects(userID)
+	if err != nil {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Failed to load projects: "+err.Error()))
+		return
+	}
+	if len(entries) == 0 {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "No projects registered yet."))
+		return
+	}
+	var b strings.Builder
+	for _, p := range entries {
+		policy := p.Policy.Decision
+		if policy == "" {
+			policy = contracts.DecisionDeny
+		}
+		b.WriteString(fmt.Sprintf("%s (%s) - %s\n", p.Alias, p.ProjectID, policy))
+	}
+	a.tg.Send(tgbotapi.NewMessage(chatID, b.String()))
+}
+
+func (a *BotApp) handleStartServer(chatID int64, args string, userID int64) {
+	if strings.TrimSpace(args) == "" {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Usage: /start_server <project>"))
+		return
+	}
+	agentKey, ok := a.store.GetUserAgentKey(userID)
+	if !ok || agentKey == "" {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "You are not paired. Use /project add to pair first."))
+		return
+	}
+	projectAlias := strings.TrimSpace(args)
+	project, err := a.resolveProject(userID, projectAlias)
+	if err != nil {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Failed to resolve project: "+err.Error()))
+		return
+	}
+	if project == nil {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Unknown project alias. Use /project list."))
+		return
+	}
+	if !a.policyAllows(project.Policy, contracts.ScopeStartServer) {
+		a.promptApproval(chatID, userID, project, []string{contracts.ScopeStartServer})
+		return
+	}
+	commandID := fmt.Sprintf("cmd-%d", time.Now().UnixNano())
+	cmd := map[string]any{
+		"type":            contracts.CommandTypeStartServer,
+		"command_id":      commandID,
+		"idempotency_key": fmt.Sprintf("key-%d", time.Now().UnixNano()),
+		"created_at":      time.Now().UTC().Format(time.RFC3339Nano),
+		"payload": map[string]string{
+			"project_id": project.ProjectID,
+		},
+	}
+	cmdBody, _ := json.Marshal(cmd)
+	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/v1/command", a.backendURL), bytes.NewBuffer(cmdBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+agentKey)
+	req.Header.Set("X-Telegram-User-ID", strconv.FormatInt(userID, 10))
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Failed to send command: "+err.Error()))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		var errResp map[string]any
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		a.tg.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Failed to queue command: %v", errResp)))
+		return
+	}
+	a.storeCommand(userID, commandRecord{CommandID: commandID, Type: contracts.CommandTypeStartServer, ProjectID: project.ProjectID, Alias: project.Alias, CreatedAt: time.Now().UTC()})
+	a.tg.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("start_server queued for %s.", project.Alias)))
+	a.pollAndRelayResult(chatID, userID, commandID)
+}
+
+func (a *BotApp) handleRun(chatID int64, prompt string, userID int64) {
+	if prompt == "" {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Usage: /run <project> <prompt>"))
+		return
+	}
+	parts := strings.Fields(prompt)
+	if len(parts) < 2 {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Usage: /run <project> <prompt>"))
+		return
+	}
+	projectAlias := parts[0]
+	userPrompt := strings.TrimSpace(strings.TrimPrefix(prompt, projectAlias))
+	if userPrompt == "" {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Usage: /run <project> <prompt>"))
+		return
+	}
+	agentKey, ok := a.store.GetUserAgentKey(userID)
+	if !ok || agentKey == "" {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "You are not paired. Use /project add to pair first."))
+		return
+	}
+	project, err := a.resolveProject(userID, projectAlias)
+	if err != nil {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Failed to resolve project: "+err.Error()))
+		return
+	}
+	if project == nil {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Unknown project alias. Use /project list."))
+		return
+	}
+	if !a.policyAllows(project.Policy, contracts.ScopeRunTask) {
+		a.promptApproval(chatID, userID, project, []string{contracts.ScopeRunTask})
+		return
+	}
+	commandID := fmt.Sprintf("cmd-%d", time.Now().UnixNano())
+	cmd := map[string]any{
+		"type":            contracts.CommandTypeRunTask,
+		"command_id":      commandID,
+		"idempotency_key": fmt.Sprintf("key-%d", time.Now().UnixNano()),
+		"created_at":      time.Now().UTC().Format(time.RFC3339Nano),
+		"payload": map[string]string{
+			"project_id": project.ProjectID,
+			"prompt":     strings.TrimSpace(userPrompt),
+		},
+	}
+	cmdBody, _ := json.Marshal(cmd)
+	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/v1/command", a.backendURL), bytes.NewBuffer(cmdBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+agentKey)
+	req.Header.Set("X-Telegram-User-ID", strconv.FormatInt(userID, 10))
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Failed to send command: "+err.Error()))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		var errResp map[string]any
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		a.tg.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Failed to queue command: %v", errResp)))
+		return
+	}
+	a.storeCommand(userID, commandRecord{CommandID: commandID, Type: contracts.CommandTypeRunTask, ProjectID: project.ProjectID, Alias: project.Alias, CreatedAt: time.Now().UTC()})
+	a.tg.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("run_task queued for %s.", project.Alias)))
+	a.pollAndRelayResult(chatID, userID, commandID)
+}
+
+func (a *BotApp) listProjects(userID int64) ([]projectRecord, error) {
+	if a.listProjectsFn != nil {
+		return a.listProjectsFn(userID)
+	}
+	resp, err := a.httpClient.Get(fmt.Sprintf("%s/v1/projects?telegram_user_id=%d", a.backendURL, userID))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("backend status %d", resp.StatusCode)
+	}
+	var out struct {
+		Projects []projectRecord `json:"projects"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out.Projects, nil
+}
+
+func (a *BotApp) resolveProject(userID int64, aliasOrID string) (*projectRecord, error) {
+	projects, err := a.listProjects(userID)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range projects {
+		if p.ProjectID == aliasOrID || strings.EqualFold(p.Alias, aliasOrID) {
+			copy := p
+			return &copy, nil
+		}
+	}
+	return nil, nil
+}
+
+func (a *BotApp) policyAllows(policy approvalDecision, scope string) bool {
+	if policy.Decision != contracts.DecisionAllow {
+		return false
+	}
+	if policy.ExpiresAt != nil && time.Now().UTC().After(*policy.ExpiresAt) {
+		return false
+	}
+	for _, s := range policy.Scope {
+		if s == scope {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *BotApp) storeCommand(userID int64, cmd commandRecord) {
+	key := fmt.Sprintf("oct.commands.%d", userID)
+	var rec storedCommands
+	if raw, ok := a.store.GetPairingCode(key); ok {
+		_ = json.Unmarshal([]byte(raw), &rec)
+	}
+	rec.Commands = append(rec.Commands, cmd)
+	if len(rec.Commands) > 20 {
+		rec.Commands = rec.Commands[len(rec.Commands)-20:]
+	}
+	bytes, _ := json.Marshal(rec)
+	_ = a.store.SetPairingCode(key, string(bytes))
+}
+
+func (a *BotApp) getLastCommand(userID int64, commandType string, projectAlias string) (commandRecord, bool) {
+	key := fmt.Sprintf("oct.commands.%d", userID)
+	raw, ok := a.store.GetPairingCode(key)
+	if !ok {
+		return commandRecord{}, false
+	}
+	var rec storedCommands
+	if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+		return commandRecord{}, false
+	}
+	for i := len(rec.Commands) - 1; i >= 0; i-- {
+		c := rec.Commands[i]
+		if c.Type != commandType {
+			continue
+		}
+		if projectAlias != "" && !strings.EqualFold(c.Alias, projectAlias) {
+			continue
+		}
+		return c, true
+	}
+	return commandRecord{}, false
+}
+
+func (a *BotApp) promptApproval(chatID int64, userID int64, project *projectRecord, scopes []string) {
+	decisionOptions := []struct {
+		Label string
+		Data  string
+	}{
+		{"Deny", "approve:deny"},
+		{"Allow 30m: START_SERVER", "approve:allow30:start"},
+		{"Allow 30m: START_SERVER + RUN_TASK", "approve:allow30:both"},
+		{"Allow until revoked: START_SERVER + RUN_TASK", "approve:allow:both"},
+	}
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, len(decisionOptions))
+	for _, opt := range decisionOptions {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(opt.Label, fmt.Sprintf("%s|%s", opt.Data, project.Alias))))
+	}
+	msg := tgbotapi.NewMessage(chatID, fmt.Sprintf("Approval required for %s.", project.Alias))
+	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
+	a.tg.Send(msg)
+}
+
+// handleStartServer queues a start_server command to the backend.
+
+// handleAgentStatus queues a status command to the backend
+func (a *BotApp) handleAgentStatus(chatID int64, userID int64) {
+	// Get agent key from store
+	agentKey, ok := a.store.GetUserAgentKey(userID)
+	if !ok || agentKey == "" {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "You are not paired. Use /project add to pair first."))
+		return
+	}
+
+	// Create command
+	cmd := map[string]any{
+		"type":            contracts.CommandTypeStatus,
+		"command_id":      fmt.Sprintf("cmd-%d", time.Now().UnixNano()),
+		"idempotency_key": fmt.Sprintf("key-%d", time.Now().UnixNano()),
+		"created_at":      time.Now().UTC().Format(time.RFC3339Nano),
+		"payload":         map[string]any{},
+	}
+
+	cmdBody, _ := json.Marshal(cmd)
+	req, _ := http.NewRequest("POST", fmt.Sprintf("%s/v1/command", a.backendURL), bytes.NewBuffer(cmdBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+agentKey)
+	req.Header.Set("X-Telegram-User-ID", strconv.FormatInt(userID, 10))
+
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Failed to send command: "+err.Error()))
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusAccepted {
+		commandID := cmd["command_id"].(string)
+		a.storeCommand(userID, commandRecord{CommandID: commandID, Type: contracts.CommandTypeStatus, CreatedAt: time.Now().UTC()})
+		a.tg.Send(tgbotapi.NewMessage(chatID, "Status command queued."))
+		a.pollAndRelayResult(chatID, userID, commandID)
+	} else {
+		var errResp map[string]any
+		json.NewDecoder(resp.Body).Decode(&errResp)
+		a.tg.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Failed to queue command: %v", errResp)))
+	}
+}
+
+func (a *BotApp) pollAndRelayResult(chatID int64, userID int64, commandID string) {
+	go func() {
+		timeout := time.After(2 * time.Second)
+		ticker := time.NewTicker(200 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-timeout:
+				return
+			case <-ticker.C:
+				res, err := a.fetchResult(userID, commandID)
+				if err != nil || res == nil {
+					continue
+				}
+				if res.OK {
+					a.tg.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Result: %s", formatSummary(res))))
+				} else {
+					a.tg.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Result error: %s", res.ErrorCode)))
+				}
+				return
+			}
+		}
+	}()
+}
+
+func formatSummary(res *contracts.CommandResult) string {
+	if res == nil {
+		return ""
+	}
+	parts := []string{}
+	if res.Summary != "" {
+		parts = append(parts, res.Summary)
+	}
+	if res.Stdout != "" {
+		parts = append(parts, truncateOutput(res.Stdout))
+	}
+	if res.Stderr != "" {
+		parts = append(parts, truncateOutput(res.Stderr))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func truncateOutput(s string) string {
+	const max = 2048
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
+}
+
+func (a *BotApp) fetchResult(userID int64, commandID string) (*contracts.CommandResult, error) {
+	resp, err := a.httpClient.Get(fmt.Sprintf("%s/v1/result/status?telegram_user_id=%d&command_id=%s", a.backendURL, userID, commandID))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNoContent {
+		return nil, nil
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("backend status %d", resp.StatusCode)
+	}
+	var result contracts.CommandResult
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }

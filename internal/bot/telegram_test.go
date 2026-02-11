@@ -2,6 +2,8 @@ package bot
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +61,8 @@ func testBotApp(cfg *Config, oc OpencodeClientInterface) (*BotApp, *recordingTel
 		activeRuns:   make(map[string]string),
 		runOwners:    make(map[string]string),
 		sleep:        func(time.Duration) {},
+		httpClient:   &http.Client{Timeout: 2 * time.Second},
+		backendURL:   "http://example.invalid",
 	}
 	return app, tg, st
 }
@@ -353,148 +357,15 @@ func TestBotApp_HandleMySessionAndAbort(t *testing.T) {
 }
 
 func TestBotApp_HandleRun(t *testing.T) {
-	t.Run("usage when prompt empty", func(t *testing.T) {
-		app, tg, _ := testBotApp(&Config{}, &mockOpencodeClient{})
-		app.handleRun(1, "", 1)
-		if len(tg.sentMessages) != 1 || !strings.Contains(tg.sentMessages[0].Text, "Usage: /run") {
-			t.Fatalf("expected usage message, got %+v", tg.sentMessages)
-		}
-	})
+	app, tg, st := testBotApp(&Config{}, &mockOpencodeClient{})
+	_ = st.SetUserAgentKey(7, "agent-key")
+	app.backendURL = "http://example.invalid"
+	app.httpClient = &http.Client{Timeout: 200 * time.Millisecond}
 
-	t.Run("selected session is used when valid", func(t *testing.T) {
-		calledSID := ""
-		oc := &mockOpencodeClient{
-			listSessions: func() ([]map[string]any, error) {
-				return []map[string]any{{"id": "ses_selected", "title": "oct_user_7"}}, nil
-			},
-			promptSession: func(sid, _ string) (map[string]any, error) {
-				calledSID = sid
-				return map[string]any{"ok": true}, nil
-			},
-		}
-		app, tg, st := testBotApp(&Config{SessionPrefix: "oct_"}, oc)
-		_ = st.SetUserSession(7, "ses_selected")
-		app.handleRun(5, "hello", 7)
-
-		if calledSID != "ses_selected" {
-			t.Fatalf("expected selected session, got %q", calledSID)
-		}
-		if len(tg.sentMessages) != 1 || tg.sentMessages[0].Text != "Running on Opencode..." {
-			t.Fatalf("expected running message, got %+v", tg.sentMessages)
-		}
-	})
-
-	t.Run("selected session invalid gives recovery message", func(t *testing.T) {
-		promptCalled := false
-		oc := &mockOpencodeClient{
-			listSessions: func() ([]map[string]any, error) {
-				return []map[string]any{{"id": "ses_other", "title": "oct_user_9"}}, nil
-			},
-			promptSession: func(sid, _ string) (map[string]any, error) {
-				promptCalled = true
-				return map[string]any{"ok": true}, nil
-			},
-		}
-		app, tg, st := testBotApp(&Config{SessionPrefix: "oct_"}, oc)
-		_ = st.SetUserSession(7, "ses_missing")
-		app.handleRun(5, "hello", 7)
-
-		if promptCalled {
-			t.Fatalf("did not expect prompt call for invalid selected session")
-		}
-		if len(tg.sentMessages) != 1 || !strings.Contains(tg.sentMessages[0].Text, "no longer available") {
-			t.Fatalf("expected recovery message, got %+v", tg.sentMessages)
-		}
-	})
-
-	t.Run("user fallback session is deterministic", func(t *testing.T) {
-		createCalls := 0
-		prompts := make([]string, 0, 2)
-		oc := &mockOpencodeClient{}
-		oc.listSessions = func() ([]map[string]any, error) {
-			if createCalls == 0 {
-				return []map[string]any{}, nil
-			}
-			return []map[string]any{{"id": "ses_user_7", "title": "oct_user_7"}}, nil
-		}
-		oc.createSession = func(title string) (map[string]any, error) {
-			createCalls++
-			if title != "oct_user_7" {
-				t.Fatalf("unexpected fallback title %q", title)
-			}
-			return map[string]any{"id": "ses_user_7"}, nil
-		}
-		oc.promptSession = func(sid, _ string) (map[string]any, error) {
-			prompts = append(prompts, sid)
-			return map[string]any{"ok": true}, nil
-		}
-
-		app, _, _ := testBotApp(&Config{SessionPrefix: "oct_"}, oc)
-		app.handleRun(1, "first", 7)
-		app.clearRun(1, 7)
-		app.handleRun(1, "second", 7)
-
-		if createCalls != 1 {
-			t.Fatalf("expected one fallback create, got %d", createCalls)
-		}
-		if len(prompts) != 2 || prompts[0] != "ses_user_7" || prompts[1] != "ses_user_7" {
-			t.Fatalf("expected deterministic fallback session, got %+v", prompts)
-		}
-	})
-
-	t.Run("active run conflict is isolated by chat and user", func(t *testing.T) {
-		prompts := 0
-		oc := &mockOpencodeClient{
-			listSessions: func() ([]map[string]any, error) {
-				return []map[string]any{
-					{"id": "ses_u1", "title": "oct_user_1"},
-					{"id": "ses_u2", "title": "oct_user_2"},
-				}, nil
-			},
-			promptSession: func(_, _ string) (map[string]any, error) {
-				prompts++
-				return map[string]any{"ok": true}, nil
-			},
-		}
-		app, tg, _ := testBotApp(&Config{SessionPrefix: "oct_"}, oc)
-
-		app.handleRun(11, "first", 1)
-		app.handleRun(11, "second", 1)
-		app.handleRun(11, "other-user", 2)
-
-		if prompts != 2 {
-			t.Fatalf("expected 2 prompt starts, got %d", prompts)
-		}
-		if len(tg.sentMessages) != 3 {
-			t.Fatalf("expected 3 user-visible messages, got %d", len(tg.sentMessages))
-		}
-		if !strings.Contains(tg.sentMessages[1].Text, "already active") {
-			t.Fatalf("expected deterministic conflict response, got %q", tg.sentMessages[1].Text)
-		}
-	})
-
-	t.Run("prompt start failure clears active state", func(t *testing.T) {
-		prompts := 0
-		oc := &mockOpencodeClient{
-			listSessions: func() ([]map[string]any, error) {
-				return []map[string]any{{"id": "ses_u7", "title": "oct_user_7"}}, nil
-			},
-			promptSession: func(_, _ string) (map[string]any, error) {
-				prompts++
-				return nil, fmt.Errorf("prompt failed")
-			},
-		}
-		app, tg, _ := testBotApp(&Config{SessionPrefix: "oct_"}, oc)
-		app.handleRun(5, "hello", 7)
-		app.handleRun(5, "retry", 7)
-
-		if prompts != 2 {
-			t.Fatalf("expected second run after failure to be allowed, got %d prompts", prompts)
-		}
-		if len(tg.sentMessages) != 4 {
-			t.Fatalf("expected running+error twice, got %d", len(tg.sentMessages))
-		}
-	})
+	app.handleRun(1, "", 7)
+	if len(tg.sentMessages) != 1 || !strings.Contains(tg.sentMessages[0].Text, "Usage: /run") {
+		t.Fatalf("expected usage message, got %+v", tg.sentMessages)
+	}
 }
 
 func TestBotApp_StartPolling(t *testing.T) {
@@ -503,12 +374,12 @@ func TestBotApp_StartPolling(t *testing.T) {
 			listSessions: func() ([]map[string]any, error) {
 				return []map[string]any{{"id": "ses_user_1", "title": "oct_user_1"}}, nil
 			},
-			promptSession: func(_, _ string) (map[string]any, error) { return map[string]any{"ok": true}, nil },
 		}
 		app, tg, _ := testBotApp(&Config{AllowedIDs: map[int64]bool{1: true}, SessionPrefix: "oct_"}, oc)
 
 		updates := make(chan tgbotapi.Update, 6)
 		tg.updates = updates
+		tg.nextMsgID = 100
 		updates <- tgbotapi.Update{Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 1}, From: &tgbotapi.User{ID: 2}, Text: "/start", Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 6}}}}
 		updates <- tgbotapi.Update{Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 1}, From: &tgbotapi.User{ID: 2}, Text: "/help", Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 5}}}}
 		updates <- tgbotapi.Update{Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 1}, From: &tgbotapi.User{ID: 2}, Text: "/run hi", Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 4}}}}
@@ -531,9 +402,21 @@ func TestBotApp_StartPolling(t *testing.T) {
 			listSessions: func() ([]map[string]any, error) {
 				return []map[string]any{{"id": "ses_user_1", "title": "oct_user_1"}}, nil
 			},
-			promptSession: func(_, _ string) (map[string]any, error) { return map[string]any{"ok": true}, nil },
 		}
-		app, tg, _ := testBotApp(&Config{AllowedIDs: map[int64]bool{1: true}, OpencodeBase: "http://local", SessionPrefix: "oct_"}, oc)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/v1/command", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusAccepted)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		})
+		mux.HandleFunc("/v1/result/status", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		app, tg, st := testBotApp(&Config{AllowedIDs: map[int64]bool{1: true}, OpencodeBase: "http://local", SessionPrefix: "oct_"}, oc)
+		app.backendURL = srv.URL
+		_ = st.SetUserAgentKey(1, "agent-key")
 
 		updates := make(chan tgbotapi.Update, 10)
 		tg.updates = updates
@@ -542,6 +425,7 @@ func TestBotApp_StartPolling(t *testing.T) {
 		updates <- tgbotapi.Update{Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 1}, From: &tgbotapi.User{ID: 1}, Text: "/language", Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 9}}}}
 		updates <- tgbotapi.Update{Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 1}, From: &tgbotapi.User{ID: 1}, Text: "/mute", Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 5}}}}
 		updates <- tgbotapi.Update{Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 1}, From: &tgbotapi.User{ID: 1}, Text: "/unmute", Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 7}}}}
+		updates <- tgbotapi.Update{Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 1}, From: &tgbotapi.User{ID: 1}, Text: "/status", Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 7}}}}
 		updates <- tgbotapi.Update{CallbackQuery: &tgbotapi.CallbackQuery{ID: "cb-1", Data: "settings:language", From: &tgbotapi.User{ID: 1}, Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: 1}}}}
 		close(updates)
 
@@ -554,7 +438,7 @@ func TestBotApp_StartPolling(t *testing.T) {
 		if _, ok := tg.requests[0].(tgbotapi.CallbackConfig); !ok {
 			t.Fatalf("expected CallbackConfig request, got %T", tg.requests[0])
 		}
-		if len(tg.sentMessages) < 6 {
+		if len(tg.sentMessages) < 7 {
 			t.Fatalf("expected command and callback messages, got %d", len(tg.sentMessages))
 		}
 	})

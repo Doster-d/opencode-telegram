@@ -16,6 +16,7 @@ type Config struct {
 	TelegramMode  string
 	Port          string
 	SessionPrefix string
+	BackendURL    string
 }
 
 func LoadConfig() *Config {
@@ -29,6 +30,7 @@ func LoadConfig() *Config {
 	c.TelegramMode = getenvOr("TELEGRAM_MODE", "polling")
 	c.Port = getenvOr("PORT", "3000")
 	c.SessionPrefix = getenvOr("SESSION_PREFIX", "oct_")
+	c.BackendURL = getenvOr("OCT_BACKEND_URL", "http://localhost:8080")
 	return c
 }
 

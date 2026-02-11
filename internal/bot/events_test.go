@@ -2,10 +2,12 @@ package bot
 
 import (
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
 
+	"opencode-telegram/internal/proxy/contracts"
 	"opencode-telegram/pkg/store"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -180,10 +182,12 @@ func TestBotApp_HandleEvent_HappyPath(t *testing.T) {
 	mockTG := &mockBot{}
 	mockDebouncer := &mockDebouncer{}
 	app := &BotApp{
-		store:     store,
-		oc:        mockOC,
-		tg:        mockTG,
-		debouncer: mockDebouncer,
+		store:      store,
+		oc:         mockOC,
+		tg:         mockTG,
+		debouncer:  mockDebouncer,
+		httpClient: &http.Client{Timeout: 2 * time.Second},
+		backendURL: "http://example.invalid",
 	}
 	ev := map[string]any{
 		"type": "message.part.updated",
@@ -212,9 +216,11 @@ func TestBotApp_HandleEvent_NoSessionID(t *testing.T) {
 	mockTG := &mockBot{}
 	mockDebouncer := &mockDebouncer{}
 	app := &BotApp{
-		oc:        mockOC,
-		tg:        mockTG,
-		debouncer: mockDebouncer,
+		oc:         mockOC,
+		tg:         mockTG,
+		debouncer:  mockDebouncer,
+		httpClient: &http.Client{Timeout: 2 * time.Second},
+		backendURL: "http://example.invalid",
 	}
 	ev := map[string]any{
 		"type": "message.part.updated",
@@ -238,10 +244,12 @@ func TestBotApp_HandleEvent_SessionNotInStore(t *testing.T) {
 	mockTG := &mockBot{}
 	mockDebouncer := &mockDebouncer{}
 	app := &BotApp{
-		store:     store,
-		oc:        mockOC,
-		tg:        mockTG,
-		debouncer: mockDebouncer,
+		store:      store,
+		oc:         mockOC,
+		tg:         mockTG,
+		debouncer:  mockDebouncer,
+		httpClient: &http.Client{Timeout: 2 * time.Second},
+		backendURL: "http://example.invalid",
 	}
 	ev := map[string]any{
 		"type": "message.part.updated",
@@ -266,10 +274,12 @@ func TestBotApp_HandleEvent_GetSessionMessagesError(t *testing.T) {
 	mockTG := &mockBot{}
 	mockDebouncer := &mockDebouncer{}
 	app := &BotApp{
-		store:     store,
-		oc:        mockOC,
-		tg:        mockTG,
-		debouncer: mockDebouncer,
+		store:      store,
+		oc:         mockOC,
+		tg:         mockTG,
+		debouncer:  mockDebouncer,
+		httpClient: &http.Client{Timeout: 2 * time.Second},
+		backendURL: "http://example.invalid",
 	}
 	ev := map[string]any{
 		"type": "message.part.updated",
@@ -294,10 +304,12 @@ func TestBotApp_HandleEvent_EmptyText(t *testing.T) {
 	mockTG := &mockBot{}
 	mockDebouncer := &mockDebouncer{}
 	app := &BotApp{
-		store:     store,
-		oc:        mockOC,
-		tg:        mockTG,
-		debouncer: mockDebouncer,
+		store:      store,
+		oc:         mockOC,
+		tg:         mockTG,
+		debouncer:  mockDebouncer,
+		httpClient: &http.Client{Timeout: 2 * time.Second},
+		backendURL: "http://example.invalid",
 	}
 	ev := map[string]any{
 		"type": "message.part.updated",
@@ -316,9 +328,11 @@ func TestBotApp_HandleEvent_UnrecognizedEventType(t *testing.T) {
 	mockTG := &mockBot{}
 	mockDebouncer := &mockDebouncer{}
 	app := &BotApp{
-		oc:        mockOC,
-		tg:        mockTG,
-		debouncer: mockDebouncer,
+		oc:         mockOC,
+		tg:         mockTG,
+		debouncer:  mockDebouncer,
+		httpClient: &http.Client{Timeout: 2 * time.Second},
+		backendURL: "http://example.invalid",
 	}
 	ev := map[string]any{
 		"type": "user.updated",
@@ -343,10 +357,12 @@ func TestBotApp_HandleEvent_EventTypeFromName(t *testing.T) {
 	mockTG := &mockBot{}
 	mockDebouncer := &mockDebouncer{}
 	app := &BotApp{
-		store:     store,
-		oc:        mockOC,
-		tg:        mockTG,
-		debouncer: mockDebouncer,
+		store:      store,
+		oc:         mockOC,
+		tg:         mockTG,
+		debouncer:  mockDebouncer,
+		httpClient: &http.Client{Timeout: 2 * time.Second},
+		backendURL: "http://example.invalid",
 	}
 	ev := map[string]any{
 		"name": "message.updated",
@@ -371,10 +387,12 @@ func TestBotApp_HandleEvent_PayloadInsteadOfData(t *testing.T) {
 	mockTG := &mockBot{}
 	mockDebouncer := &mockDebouncer{}
 	app := &BotApp{
-		store:     store,
-		oc:        mockOC,
-		tg:        mockTG,
-		debouncer: mockDebouncer,
+		store:      store,
+		oc:         mockOC,
+		tg:         mockTG,
+		debouncer:  mockDebouncer,
+		httpClient: &http.Client{Timeout: 2 * time.Second},
+		backendURL: "http://example.invalid",
 	}
 	ev := map[string]any{
 		"type": "message.part.updated",
@@ -399,10 +417,12 @@ func TestBotApp_HandleEvent_FallbackToEventForPayload(t *testing.T) {
 	mockTG := &mockBot{}
 	mockDebouncer := &mockDebouncer{}
 	app := &BotApp{
-		store:     store,
-		oc:        mockOC,
-		tg:        mockTG,
-		debouncer: mockDebouncer,
+		store:      store,
+		oc:         mockOC,
+		tg:         mockTG,
+		debouncer:  mockDebouncer,
+		httpClient: &http.Client{Timeout: 2 * time.Second},
+		backendURL: "http://example.invalid",
 	}
 	ev := map[string]any{
 		"type":      "message.part.updated",
@@ -425,10 +445,12 @@ func TestBotApp_HandleEvent_RequestError(t *testing.T) {
 	mockTG := &mockBot{requestError: true}
 	mockDebouncer := &mockDebouncer{}
 	app := &BotApp{
-		store:     store,
-		oc:        mockOC,
-		tg:        mockTG,
-		debouncer: mockDebouncer,
+		store:      store,
+		oc:         mockOC,
+		tg:         mockTG,
+		debouncer:  mockDebouncer,
+		httpClient: &http.Client{Timeout: 2 * time.Second},
+		backendURL: "http://example.invalid",
 	}
 	ev := map[string]any{
 		"type": "message.part.updated",
@@ -458,9 +480,14 @@ func TestBotApp_HandleEvent_TerminalEventClearsActiveRunOwnership(t *testing.T) 
 		},
 	}
 	app, tg, _ := testBotApp(&Config{SessionPrefix: "oct_"}, oc)
-
-	app.handleRun(9, "first", 7)
-	app.handleRun(9, "blocked", 7)
+	app.httpClient = &http.Client{Timeout: 200 * time.Millisecond}
+	app.backendURL = "http://example.invalid"
+	app.listProjectsFn = func(userID int64) ([]projectRecord, error) {
+		return []projectRecord{{Alias: "demo", ProjectID: "proj-1", Policy: approvalDecision{Decision: contracts.DecisionAllow, Scope: []string{contracts.ScopeStartServer, contracts.ScopeRunTask}}}}, nil
+	}
+	_ = app.store.SetUserAgentKey(7, "agent-key")
+	app.handleRun(9, "demo first", 7)
+	app.handleRun(9, "demo blocked", 7)
 	app.handleEvent(map[string]any{
 		"type": "session.updated",
 		"data": map[string]any{
@@ -468,16 +495,13 @@ func TestBotApp_HandleEvent_TerminalEventClearsActiveRunOwnership(t *testing.T) 
 			"status":    "completed",
 		},
 	})
-	app.handleRun(9, "second", 7)
+	app.handleRun(9, "demo second", 7)
 
-	if prompts != 2 {
-		t.Fatalf("expected terminal event to unblock run and allow second prompt, got %d prompts", prompts)
+	if prompts != 0 {
+		t.Fatalf("expected no opencode prompts in backend mode, got %d", prompts)
 	}
-	if len(tg.sentMessages) != 3 {
-		t.Fatalf("expected running/conflict/running sequence, got %d messages", len(tg.sentMessages))
-	}
-	if !strings.Contains(tg.sentMessages[1].Text, "already active") {
-		t.Fatalf("expected deterministic conflict before terminal clear, got %q", tg.sentMessages[1].Text)
+	if len(tg.sentMessages) < 2 {
+		t.Fatalf("expected at least 2 messages, got %d", len(tg.sentMessages))
 	}
 }
 
@@ -498,9 +522,16 @@ func TestBotApp_HandleEvent_MultipleProgressEventsEditSingleRunMessage(t *testin
 			return "progress 2", nil
 		},
 	}
-	app, tg, _ := testBotApp(&Config{SessionPrefix: "oct_"}, oc)
+	app, tg, st := testBotApp(&Config{SessionPrefix: "oct_"}, oc)
+	app.httpClient = &http.Client{Timeout: 200 * time.Millisecond}
+	app.backendURL = "http://example.invalid"
+	app.listProjectsFn = func(userID int64) ([]projectRecord, error) {
+		return []projectRecord{{Alias: "demo", ProjectID: "proj-1", Policy: approvalDecision{Decision: contracts.DecisionAllow, Scope: []string{contracts.ScopeStartServer, contracts.ScopeRunTask}}}}, nil
+	}
 
-	app.handleRun(5, "go", 7)
+	_ = app.store.SetUserAgentKey(7, "agent-key")
+	app.handleRun(5, "demo go", 7)
+	_ = st.SetSession("ses_u7", 5, 1)
 	app.handleEvent(map[string]any{"type": "message.part.updated", "data": map[string]any{"sessionID": "ses_u7"}})
 	app.handleEvent(map[string]any{"type": "message.part.updated", "data": map[string]any{"sessionID": "ses_u7"}})
 

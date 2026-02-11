@@ -70,3 +70,45 @@ func TestMemoryStore_DeleteSessionClearsUserSelection(t *testing.T) {
 		t.Fatalf("expected user session to be cleared after DeleteSession")
 	}
 }
+
+func TestMemoryStore_AgentKeyManagement(t *testing.T) {
+	s := NewMemoryStore()
+	uid := int64(123)
+	key := "agent-key-123"
+
+	// Test Set and Get
+	if err := s.SetUserAgentKey(uid, key); err != nil {
+		t.Fatalf("SetUserAgentKey error: %v", err)
+	}
+	got, ok := s.GetUserAgentKey(uid)
+	if !ok || got != key {
+		t.Fatalf("GetUserAgentKey unexpected: got %q ok=%v want %q", got, ok, key)
+	}
+
+	// Test non-existent user
+	_, ok = s.GetUserAgentKey(999)
+	if ok {
+		t.Fatalf("expected no agent key for non-existent user")
+	}
+}
+
+func TestMemoryStore_PairingCodeManagement(t *testing.T) {
+	s := NewMemoryStore()
+	telegramUserID := "456"
+	code := "PAIR-000456"
+
+	// Test Set and Get
+	if err := s.SetPairingCode(telegramUserID, code); err != nil {
+		t.Fatalf("SetPairingCode error: %v", err)
+	}
+	got, ok := s.GetPairingCode(telegramUserID)
+	if !ok || got != code {
+		t.Fatalf("GetPairingCode unexpected: got %q ok=%v want %q", got, ok, code)
+	}
+
+	// Test non-existent user
+	_, ok = s.GetPairingCode("999")
+	if ok {
+		t.Fatalf("expected no pairing code for non-existent user")
+	}
+}
