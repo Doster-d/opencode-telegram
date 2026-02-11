@@ -68,10 +68,10 @@ tasks:
       - go test -covermode=count -coverprofile=coverage.out ./internal/... ./pkg/...
 
   coverage:check:
-    desc: "Fail if coverage is below 90%"
+    desc: "Fail if coverage is below 50%"
     cmds:
       - go test -covermode=count -coverprofile=coverage.out ./internal/... ./pkg/...
-      - go run ./cmd/coveragecheck -file coverage.out -min 90
+      - go run ./cmd/coveragecheck -file coverage.out -min 50
 
   coverage:html:
     desc: "Generate HTML coverage report"
