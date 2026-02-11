@@ -10,6 +10,33 @@ import (
 )
 
 func TestNewPostgresPairingStore(t *testing.T) {
+	t.Run("fails when sql open fails", func(t *testing.T) {
+		oldOpen := sqlOpen
+		sqlOpen = func(driverName, dataSourceName string) (*sql.DB, error) { return nil, sql.ErrConnDone }
+		t.Cleanup(func() { sqlOpen = oldOpen })
+
+		if _, err := NewPostgresPairingStore("postgres://x"); err == nil {
+			t.Fatal("expected sql open error")
+		}
+	})
+
+	t.Run("fails when ping fails", func(t *testing.T) {
+		db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
+		if err != nil {
+			t.Fatalf("sqlmock new: %v", err)
+		}
+		defer db.Close()
+
+		oldOpen := sqlOpen
+		sqlOpen = func(driverName, dataSourceName string) (*sql.DB, error) { return db, nil }
+		t.Cleanup(func() { sqlOpen = oldOpen })
+
+		mock.ExpectPing().WillReturnError(sql.ErrConnDone)
+		if _, err := NewPostgresPairingStore("postgres://x"); err == nil {
+			t.Fatal("expected ping error")
+		}
+	})
+
 	t.Run("initializes schema", func(t *testing.T) {
 		db, mock, err := sqlmock.New(sqlmock.MonitorPingsOption(true))
 		if err != nil {

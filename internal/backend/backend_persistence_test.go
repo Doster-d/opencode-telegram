@@ -64,6 +64,7 @@ func TestMemoryBackendPairingStorePaths(t *testing.T) {
 	b := NewMemoryBackend()
 	now := time.Date(2026, 2, 11, 12, 30, 0, 0, time.UTC)
 	b.SetClock(func() time.Time { return now })
+	b.SetPairingPersistence(fakePairingStore{})
 
 	calledSavePair := false
 	calledDelete := false
@@ -116,6 +117,13 @@ func TestMemoryBackendPairingStoreErrorBranches(t *testing.T) {
 	b := NewMemoryBackend()
 	b.SetClock(time.Now)
 
+	if _, err := b.StartPairing(""); err == nil {
+		t.Fatal("expected validation error for empty telegram user")
+	}
+	if _, err := b.ClaimPairing(contracts.PairClaimRequest{}); err == nil {
+		t.Fatal("expected validation error for empty pairing code")
+	}
+
 	b.SetPairingPersistence(fakePairingStore{
 		savePairCodeFn: func(code, telegramUserID string, expiresAt time.Time) error {
 			return contracts.APIError{Code: contracts.ErrInternal, Message: "save failed"}
@@ -123,6 +131,15 @@ func TestMemoryBackendPairingStoreErrorBranches(t *testing.T) {
 	})
 	if _, err := b.StartPairing("u"); err == nil {
 		t.Fatal("expected start pairing persistence error")
+	}
+
+	b.SetPairingPersistence(fakePairingStore{
+		getPairCodeFn: func(code string) (string, time.Time, bool, error) {
+			return "", time.Time{}, false, contracts.APIError{Code: contracts.ErrInternal, Message: "lookup failed"}
+		},
+	})
+	if _, err := b.ClaimPairing(contracts.PairClaimRequest{PairingCode: "PAIR-000001"}); err == nil {
+		t.Fatal("expected lookup error")
 	}
 
 	b.SetPairingPersistence(fakePairingStore{
@@ -174,6 +191,21 @@ func TestMemoryBackendPairingStoreLookupsAndFallbacks(t *testing.T) {
 	}
 	if uid, ok := b.UserIDForAgent("a1"); !ok || uid != "u1" {
 		t.Fatalf("expected store agent lookup, got uid=%q ok=%v", uid, ok)
+	}
+
+	b.SetPairingPersistence(fakePairingStore{
+		getAgentByKeyFn:  func(agentKey string) (string, bool, error) { return "", false, nil },
+		getAgentByUserFn: func(telegramUserID string) (string, bool, error) { return "", false, nil },
+		getUserByAgentFn: func(agentID string) (string, bool, error) { return "", false, nil },
+	})
+	if _, ok := b.AuthenticateAgentKey("missing"); ok {
+		t.Fatal("expected missing key to be denied")
+	}
+	if _, ok := b.AgentIDForUser("missing"); ok {
+		t.Fatal("expected missing user to be denied")
+	}
+	if _, ok := b.UserIDForAgent("missing"); ok {
+		t.Fatal("expected missing agent to be denied")
 	}
 
 	b.agentByKey["k2"] = "a2"
